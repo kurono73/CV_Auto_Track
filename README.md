@@ -1,5 +1,4 @@
 # CV Auto Track
-Fast OpenCV auto tracking with solve refinement
 ## Overview
 
 CV Auto Track adds fast OpenCV-powered auto tracking to Blender's Movie Clip Editor.
@@ -21,7 +20,7 @@ It is designed for a simple preset-based workflow: open footage, choose a preset
 
 CV Auto Track works best on footage with visible texture and real camera motion.
 
-- Static-scene camera tracking shots
+- Camera tracking shots with stable environments
 - Architecture, streets, interiors, and other corner-rich environments
 - Dolly, drone, handheld, and pan shots with visible parallax
 - Long or changing-view shots using the `Dynamic` preset
@@ -86,7 +85,7 @@ The header preset menu uses Blender's standard preset system. Use it to save and
 
 - **Lenient:** Keeps more tracks and uses softer rejection. Useful for difficult footage or low coverage.
 - **Standard:** Default general-purpose cleanup and refine balance.
-- **Strict:** Rejects more aggressively when footage has dense, stable coverage.
+- **Strict:** Rejects more aggressively when footage has dense, stable coverage.  
 
 Filter presets affect candidate cleanup and solve-refine rejection. They do not change tracking direction or detection density.
 
@@ -96,7 +95,8 @@ Filter presets affect candidate cleanup and solve-refine rejection. They do not 
 - **Backward:** Tracks from the last frame of the selected range toward the beginning.
 - **Both:** Tracks from the range center toward both ends.
 - **Current:** Uses the current clip frame as the anchor and tracks both directions.
-- **Auto:** Runs separate forward and backward passes. This is the default because it improves coverage on changing shots with little extra cost in typical use.
+- **Auto:** Runs separate forward and backward passes. This is the default because it improves coverage on changing shots with little extra cost in typical use.  
+
 Backward, Both, Current, and Blender solve/refine stages can delay UI response more than Forward and Auto tracking.
 
 ## Track Setup
@@ -104,7 +104,8 @@ Track Setup controls which frames are analyzed and how OpenCV reads the footage 
 - **Frame Range:** Chooses the clip range to process. Use Clip Full Range for most shots, or Custom Range when testing a shorter section.
 - **Direction:** Chooses the tracking pass direction. `Auto` is the default for broader coverage; `Forward` is the fastest.
 - **Analysis Scale:** Sets the temporary OpenCV analysis resolution. Lower values are faster; higher values can find more detail.
-- **Use Mask:** Enables mask-aware detection and tracking. Use this when moving objects or forbidden areas should be avoided.
+- **Use Mask:** Enables mask-aware detection and tracking. Use this when moving objects or forbidden areas should be avoided.  
+
 Advanced Mode adds minimum analysis resolution, frame cache size, and other technical controls.
 
 
@@ -155,5 +156,46 @@ Advanced Mode exposes lower-level controls for difficult footage and testing.
 - **Existing Tracks:** Controls how user-created and existing `AT_` tracks are protected or reused.
 
 `Auto Scale Pixel Parameters` is enabled by default. Pixel-based settings are scaled internally from the effective analysis resolution so presets behave more consistently across FHD, 4K, and different analysis-scale choices.
-
+  
 Experimental detector options such as `SIFT`, `ORB`, and `FAST` are available in Advanced Mode. `Shi-Tomasi` remains the default and is usually the best fit for fast Lucas-Kanade tracking.
+
+---
+
+# Frequently Asked Questions
+
+- **The camera solve is incorrect or unstable.**  
+    Make sure your camera settings are correct before solving.
+    If **Auto Keyframe A/B** selects unsuitable keyframes, disable it and manually choose a different **Keyframe A** and **Keyframe B**, then solve again.  
+    
+- **Focal Length or Radial Distortion is not estimated correctly.**  
+    CV Auto Track uses Blender's built-in camera solver for camera calibration.  
+    Depending on the footage, the selected **Keyframe A/B**, or the initial camera parameters, **Focal Length** and **Radial Distortion** may not be estimated accurately.  
+    Try selecting different keyframes or providing more suitable initial values.
+    
+- **Too many good tracks are removed.**  
+    **Run Auto Track** and **Solve & Refine** automatically remove high-error tracks based on the selected **Filter** settings.  
+    If you want to keep all generated tracks:  
+    - Use **Generate Tracks** followed by Blender's standard **Solve**.
+    - Or adjust the **Filter** settings before running the solve.
+- **Processing is very slow.**
+    Processing time depends on several factors, including:
+    - High source resolution
+    - Higher **Density** values
+    - Long footage
+    - Using the **Detailed** preset  
+    As a reference, a **200-frame Full HD clip** typically finishes in **around 15 seconds** with the **Fast** preset, depending on your hardware.
+    
+- **The camera does not move in the 3D View after solving.**  
+    After solving, follow Blender's standard camera tracking workflow.  
+    You still need to:  
+    - Apply the **Camera Solver** constraint.
+    - Perform the camera layout/alignment for your scene.
+    
+- **No tracks are generated with any preset.**  
+    Your footage may not be suitable for automatic tracking.  
+    CV Auto Track works best on footage with:  
+    - Visible texture and feature-rich surfaces
+    - Real camera motion
+    - Good image quality
+    - Stable lighting
+    - Limited motion blur and defocus
