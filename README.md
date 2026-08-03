@@ -58,7 +58,7 @@ For a track-only pass without solving, use `Generate Tracks`.
 - **Density:** Scales the generated marker amount. Lower values make a lighter solve set; higher values create denser coverage.
 - **Solve Setup:** Opens common camera solve options in one dialog, including Auto Keyframe A/B, tripod motion, camera focal settings, distortion refine options, Full Auto refine passes, and baked marker area size.
   - **Auto Keyframe A/B:** Chooses stable solve keyframes automatically and disables Blender's built-in Keyframe Selection to avoid overlapping behavior.
-  - **Full Auto Refine Passes:** Sets how many solve-refine passes Run Auto Track may 
+  - **Full Auto Refine Passes:** Sets how many solve-refine passes Run Auto Track may run.
   - **Bake Marker Size:** Sets the Pattern and Search area size for generated Blender markers.
 
 - **Solve:** Runs Blender's standard camera solve from the add-on UI.
