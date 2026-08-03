@@ -64,7 +64,7 @@ For a track-only pass without solving, use `Generate Tracks`.
 - **Solve:** Runs Blender's standard camera solve from the add-on UI.
 - **Solve & Refine:** Runs solve and removes high-error or motion-inconsistent tracks in controlled passes.
 - **Analyze Solve:** Selects or reports likely solve outliers without changing the solve by itself.
-- **Restore Previous State:** Deletes CV Auto Track-created `AT_` tracks from the active Movie Clip.
+- **Delete Auto Tracks:** Deletes CV Auto Track-created `AT_` tracks from the active Movie Clip.
 
 During Forward and Auto tracking, the detection/tracking stage runs in chunks so progress and cancellation remain responsive. Blender's solve and refine calls are still Blender operations and may pause the UI while they run.
 
