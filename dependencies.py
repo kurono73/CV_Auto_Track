@@ -76,4 +76,4 @@ def dependency_status() -> tuple[bool, str]:
         numpy, cv2 = ensure_numpy_cv2()
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    return True, f"NumPy {numpy.__version__}, OpenCV {cv2.__version__}"
+    return True, f"OpenCV {cv2.__version__} (NumPy {numpy.__version__})"

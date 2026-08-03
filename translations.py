@@ -335,7 +335,7 @@ _JA_JP = _dictionary(
         ("Add more Blender tracks from the latest cached OpenCV tracking candidates", "直近のOpenCVトラッキング候補キャッシュからBlenderトラックを追加します"),
         ("Auto Refine", "自動リファイン"),
         ("Toggle whether Full Auto Track runs solve refinement", "フル自動トラックでソルブのリファインを実行するか切り替えます"),
-        ("Restore Previous State", "前の状態に戻す"),
+        ("Delete Auto Tracks", "自動トラックを削除"),
         ("Delete CV Auto Track-created tracks from the active Movie Clip", "アクティブなムービークリップからCV Auto Trackが作成したトラックを削除します"),
         ("Add CV Auto Track Preset", "CV Auto Trackプリセットを追加"),
         ("File Path", "ファイルパス"),

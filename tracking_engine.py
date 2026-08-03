@@ -8,7 +8,6 @@ from .blender_tracks import (
     bake_candidates,
     existing_track_points,
     is_autotrack_track,
-    mute_autotrack_tracks,
     target_tracks,
 )
 from .candidate_cache import get_candidate_cache, store_candidate_cache
@@ -1243,20 +1242,15 @@ def _delete_autotrack_tracks(context, clip) -> int:
         return 0
     override = _clip_editor_override(context, clip)
     if override is None:
-        mute_autotrack_tracks(clip)
-        return 0
+        raise RuntimeError("Movie Clip Editor area is required to replace existing CV Auto Track tracks.")
     area, region, space, previous_clip = override
     try:
         with context.temp_override(area=area, region=region, space_data=space):
             result = bpy.ops.clip.delete_track(confirm=False)
-    except RuntimeError:
-        mute_autotrack_tracks(clip)
-        return 0
     finally:
         space.clip = previous_clip
     if "FINISHED" not in result:
-        mute_autotrack_tracks(clip)
-        return 0
+        raise RuntimeError(f"bpy.ops.clip.delete_track returned {result}.")
     return delete_count
 
 

@@ -20,6 +20,16 @@ def track_name(index: int) -> str:
     return f"{TRACK_PREFIX}{index:04d}"
 
 
+def next_track_name(used_names: set[str], start_index: int = 1) -> str:
+    index = max(1, int(start_index))
+    while True:
+        name = track_name(index)
+        if name not in used_names:
+            used_names.add(name)
+            return name
+        index += 1
+
+
 def existing_track_points(clip, frame: int, width: int, height: int, include_autotrack: bool = True) -> list[tuple[float, float]]:
     points = []
     for track in target_tracks(clip):
@@ -30,16 +40,6 @@ def existing_track_points(clip, frame: int, width: int, height: int, include_aut
             continue
         points.append(marker_co_to_pixel(tuple(marker.co), width, height))
     return points
-
-
-def mute_autotrack_tracks(clip) -> int:
-    count = 0
-    for track in target_tracks(clip):
-        if is_autotrack_track(track):
-            for marker in track.markers:
-                marker.mute = True
-            count += 1
-    return count
 
 
 def bake_candidates(
@@ -53,9 +53,9 @@ def bake_candidates(
     search_size: int = 30,
 ) -> tuple[int, int]:
     if replace_autotrack:
-        mute_autotrack_tracks(clip)
+        raise RuntimeError("Existing CV Auto Track tracks must be deleted before baking replacement tracks.")
     tracks = target_tracks(clip)
-    existing_count = sum(1 for track in tracks if is_autotrack_track(track))
+    used_names = {str(track.name) for track in tracks}
     created = 0
     disabled = 0
     for candidate in candidates:
@@ -67,7 +67,7 @@ def bake_candidates(
         created += 1
         if candidate.disabled:
             disabled += 1
-        name = track_name(existing_count + created)
+        name = next_track_name(used_names)
         first = samples[0]
         track = tracks.new(name=name, frame=int(first.frame))
         track.use_custom_color = True

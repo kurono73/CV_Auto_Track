@@ -124,7 +124,7 @@ class CV_AUTOTRACK_PT_main(bpy.types.Panel):
         row = box.row(align=True)
         row.operator("clip.cv_autotrack_analyze_solve", text="Analyze Solve", icon="VIEWZOOM", translate=False)
         _draw_refine_intrinsics(box, _active_clip(context))
-        layout.operator("clip.cv_autotrack_restore_previous_state", icon="LOOP_BACK")
+        layout.operator("clip.cv_autotrack_restore_previous_state", text="Delete Auto Tracks", icon="LOOP_BACK")
         layout.label(text=props.status_message)
 
 

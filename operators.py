@@ -25,11 +25,21 @@ def active_clip(context):
     space = getattr(context, "space_data", None)
     if space and space.type == "CLIP_EDITOR" and space.clip:
         return space.clip
-    for area in context.window.screen.areas:
-        if area.type == "CLIP_EDITOR":
-            for space in area.spaces:
-                if space.type == "CLIP_EDITOR" and space.clip:
-                    return space.clip
+    if space is not None:
+        return None
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None) or getattr(context, "screen", None)
+    if screen is not None:
+        clips = []
+        for area in screen.areas:
+            if area.type != "CLIP_EDITOR":
+                continue
+            for area_space in area.spaces:
+                if area_space.type == "CLIP_EDITOR" and area_space.clip:
+                    clips.append(area_space.clip)
+        unique = {getattr(clip, "session_uid", None) or id(clip): clip for clip in clips}
+        if len(unique) == 1:
+            return next(iter(unique.values()))
     return None
 
 
@@ -57,8 +67,8 @@ def _status_from_stats(stats: TrackingStats) -> str:
 def _flush_clip_tracking(context, clip) -> None:
     try:
         clip.update_tag()
-    except Exception:
-        pass
+    except (AttributeError, RuntimeError) as exc:
+        print(f"[CV Auto Track] Clip update skipped: {exc}")
 
 
 def _clip_editor_override(context, clip):
@@ -134,7 +144,7 @@ def _run_safely(operator, context, func):
     try:
         ok, message = dependency_status()
         if not ok:
-            raise RuntimeError(f"OpenCV/NumPy import failed: {message}")
+            raise RuntimeError(f"OpenCV dependency import failed: {message}")
         clip = active_clip(context)
         if clip is None:
             raise RuntimeError("Movie Clip is not selected.")
@@ -168,7 +178,7 @@ class CV_AUTOTRACK_OT_detect_track(bpy.types.Operator):
         try:
             ok, message = dependency_status()
             if not ok:
-                raise RuntimeError(f"OpenCV/NumPy import failed: {message}")
+                raise RuntimeError(f"OpenCV dependency import failed: {message}")
             clip = active_clip(context)
             if clip is None:
                 raise RuntimeError("Movie Clip is not selected in the Clip Editor.")
@@ -525,7 +535,7 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
         try:
             ok, message = dependency_status()
             if not ok:
-                raise RuntimeError(f"OpenCV/NumPy import failed: {message}")
+                raise RuntimeError(f"OpenCV dependency import failed: {message}")
             clip = active_clip(context)
             if clip is None:
                 raise RuntimeError("Movie Clip is not selected in the Clip Editor.")
@@ -768,7 +778,7 @@ class CV_AUTOTRACK_OT_toggle_auto_refine(bpy.types.Operator):
 
 class CV_AUTOTRACK_OT_restore_previous_state(bpy.types.Operator):
     bl_idname = "clip.cv_autotrack_restore_previous_state"
-    bl_label = "Restore Previous State"
+    bl_label = "Delete Auto Tracks"
     bl_description = "Delete CV Auto Track-created tracks from the active Movie Clip"
     bl_options = {"REGISTER", "UNDO"}
 
