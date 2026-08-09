@@ -35,20 +35,28 @@ Some shots may need masks, a different preset, or manual cleanup.
 - Unmasked people, vehicles, or other moving objects
 - Reflections, transparent surfaces, repeated patterns, water, smoke, foliage, or sky
 - Very low-texture walls or flat surfaces
-- Codecs that Blender can read but OpenCV cannot read reliably
 
 ## Current Workflow
 
-1. Open footage in Blender's Movie Clip Editor and set the footage settings as usual.
-2. Open the Toolbar tab named `CV  Auto Track`.
+1. Open footage in Blender's **Movie Clip Editor** and configure the clip settings as usual.
+2. Open the `CV Auto Track`panel from the Toolbar.
 3. Choose a tracking preset such as `Fast`, `Dynamic`, or `High Motion`.
-4. Optional: open `Solve Setup` to review keyframes, tripod motion, focal length, distortion refine options, and Full Auto refine passes.
-5. Optional: enable `Use Mask` to avoid moving objects or tracking-forbidden areas.
-6. Adjust `Density` only when you want fewer or more generated markers.
-7. Click `Run Auto Track`.
-8. Review the result. If needed, run `Solve` or `Solve & Refine` again after adjustment.
+4. *(Optional)* Open `Solve Setup` to review keyframes, tripod motion, focal length, distortion refinement, and Full Auto refine passes.
+5. *(Optional)* Enable `Use Mask` to exclude moving objects or tracking-forbidden areas.
+6. *(Optional)* Adjust `Density` only if you want fewer or more generated markers.
+7. Click **`Run Auto Track`**.
+8. Review the generated tracks and camera solve.
+9. If necessary, remove poor tracks manually, adjust the solve, or add additional manual tracks using Blender's standard tracking workflow.
+10. Run `Solve` or `Solve & Refine` again after any adjustments.
 
 For a track-only pass without solving, use `Generate Tracks`.
+
+>- The `Filter` system removes many unreliable tracks, but does not filter by reprojection error because it depends on the camera solve. Even with a low overall solve error, tracks above 2.0 px may still require attention. Check the Dope Sheet and remove problematic tracks manually, or use Blender's standard `Solve > Clean Up` tools to filter high-error tracks when needed.  
+>- Running `Generate Tracks` first allows you to visually remove tracks on moving objects or other problematic tracks before solving, which can improve tracking quality and skip the need for masking.
+>- **CV Auto Track is designed to work together with Blender's standard tracking tools.** Add manual tracks whenever needed and continue with Blender's normal tracking workflow to improve difficult shots.  
+>- **Proxy Fallback:** For footage formats not supported by OpenCV, such as OpenEXR, CV Auto Track automatically creates and uses a Blender 100% proxy, or reuses an existing one. If an existing proxy is used, a high `Quality` setting is recommended to avoid reducing tracking accuracy.  
+>- **Protected Tracks:** Selected tracks are excluded from the `Solve & Refine` filtering process, allowing important tracks to be preserved.
+
 
 ## Main Commands
 
@@ -58,15 +66,17 @@ For a track-only pass without solving, use `Generate Tracks`.
 - **Density:** Scales the generated marker amount. Lower values make a lighter solve set; higher values create denser coverage.
 - **Solve Setup:** Opens common camera solve options in one dialog, including Auto Keyframe A/B, tripod motion, camera focal settings, distortion refine options, Full Auto refine passes, and baked marker area size.
   - **Auto Keyframe A/B:** Chooses stable solve keyframes automatically and disables Blender's built-in Keyframe Selection to avoid overlapping behavior.
-  - **Full Auto Refine Passes:** Sets how many solve-refine passes Run Auto Track may run.
+  - **Auto Scene Setup:** Sets up the active scene camera after solving, including Camera Solver, clip background, and undistorted display when needed.  
+  - **Full Auto Refine Passes:** Sets how many solve-refine passes Run Auto Track may run. 
   - **Bake Marker Size:** Sets the Pattern and Search area size for generated Blender markers.
 
 - **Solve:** Runs Blender's standard camera solve from the add-on UI.
 - **Solve & Refine:** Runs solve and removes high-error or motion-inconsistent tracks in controlled passes.
 - **Analyze Solve:** Selects or reports likely solve outliers without changing the solve by itself.
-- **Delete Auto Tracks:** Deletes CV Auto Track-created `AT_` tracks from the active Movie Clip.
 
 During Forward and Auto tracking, the detection/tracking stage runs in chunks so progress and cancellation remain responsive. Blender's solve and refine calls are still Blender operations and may pause the UI while they run.
+  
+If radial distortion refine is enabled, CV Auto Track resets distortion values before solve/refine so the solve starts from a clean distortion state.
 
 ## Presets
 
@@ -79,7 +89,7 @@ During Forward and Auto tracking, the detection/tracking stage runs in chunks so
 
 Preset selection applies settings immediately. There is no separate Apply button.
 
-The header preset menu uses Blender's standard preset system. Use it to save and reuse your own CV Auto Track settings. MovieClip and Mask datablock pointers are not stored in these presets.
+The header preset menu uses Blender's standard preset system. Use it to save and reuse your own CV Auto Track settings. MovieClip and Mask datablock pointers are not stored in these presets. 
 
 ## Filter Presets
 
@@ -133,7 +143,6 @@ Mask handling applies to both detection and tracking. If a track enters the forb
 
 External mask clips can be synced to the active footage settings. If the mask duration differs from the active clip, the UI shows a warning.
 
-If radial distortion refine is enabled, CV Auto Track resets distortion values before solve/refine so the solve starts from a clean distortion state.
 
 ## Baked Track Details
 
@@ -176,20 +185,16 @@ Experimental detector options such as `SIFT`, `ORB`, and `FAST` are available in
     **Run Auto Track** and **Solve & Refine** automatically remove high-error tracks based on the selected **Filter** settings.  
     If you want to keep all generated tracks:  
     - Use **Generate Tracks** followed by Blender's standard **Solve**.
-    - Or adjust the **Filter** settings before running the solve.
+    - Or adjust the **Filter** settings before running the solve.  
+    - Selected tracks are excluded from `Solve & Refine` filtering.
+
 - **Processing is very slow.**
     Processing time depends on several factors, including:
     - High source resolution
     - Higher **Density** values
     - Long footage
     - Using the **Detailed** preset  
-    As a reference, a **200-frame Full HD clip** typically finishes in **around 15 seconds** with the **Fast** preset, depending on your hardware.
-    
-- **The camera does not move in the 3D View after solving.**  
-    After solving, follow Blender's standard camera tracking workflow.  
-    You still need to:  
-    - Apply the **Camera Solver** constraint.
-    - Perform the camera layout/alignment for your scene.
+    As a reference, a **200-frame Full HD** clip typically finishes in under **20 seconds** with the **Fast** preset, depending on your hardware.
     
 - **No tracks are generated with any preset.**  
     Your footage may not be suitable for automatic tracking.  
@@ -199,3 +204,6 @@ Experimental detector options such as `SIFT`, `ORB`, and `FAST` are available in
     - Good image quality
     - Stable lighting
     - Limited motion blur and defocus
+
+## License
+CV Auto Track is GPL-3.0-or-later. OpenCV is Apache-2.0 licensed.
