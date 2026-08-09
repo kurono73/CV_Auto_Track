@@ -18,6 +18,16 @@ class FilteringSettings:
     ransac_confidence: float = 0.99
     ransac_minimum_points: int = 12
     duplicate_distance: float = 6.0
+    enable_acceleration_filter: bool = True
+    acceleration_multiplier: float = 4.0
+    acceleration_minimum: float = 18.0
+    acceleration_minimum_ratio: float = 0.30
+    enable_local_motion_coherence: bool = True
+    local_motion_radius: float = 160.0
+    local_motion_multiplier: float = 4.0
+    local_motion_minimum_residual: float = 16.0
+    local_motion_minimum_tracks: int = 6
+    local_motion_minimum_ratio: float = 0.35
 
 
 def score_track(track: TrackCandidate, settings: FilteringSettings) -> float:
@@ -55,6 +65,10 @@ def filter_tracks(tracks: list[TrackCandidate], settings: FilteringSettings) -> 
         elif _valid_ratio(track) < float(settings.minimum_valid_ratio):
             track.disabled = True
             track.termination_reason = track.termination_reason or "low_valid_ratio"
+    if bool(settings.enable_acceleration_filter):
+        _filter_acceleration_jitter(tracks, settings)
+    if bool(settings.enable_local_motion_coherence):
+        _filter_local_motion_coherence(tracks, settings)
     remove_duplicates(tracks, settings.duplicate_distance)
     return tracks
 
@@ -89,6 +103,89 @@ def remove_duplicates(tracks: list[TrackCandidate], distance: float) -> None:
                     loser = track_a if track_a.quality_score < track_b.quality_score else track_b
                     loser.disabled = True
                     loser.termination_reason = "duplicate_track"
+
+
+def _filter_acceleration_jitter(tracks: list[TrackCandidate], settings: FilteringSettings) -> None:
+    for track in tracks:
+        if track.disabled:
+            continue
+        samples = track.valid_samples
+        if len(samples) < 5:
+            continue
+        velocities = []
+        for a, b in zip(samples, samples[1:]):
+            frame_delta = max(1, int(b.frame) - int(a.frame))
+            velocities.append(((b.x - a.x) / frame_delta, (b.y - a.y) / frame_delta))
+        accelerations = [
+            ((vx_b - vx_a) ** 2 + (vy_b - vy_a) ** 2) ** 0.5
+            for (vx_a, vy_a), (vx_b, vy_b) in zip(velocities, velocities[1:])
+        ]
+        if len(accelerations) < 3:
+            continue
+        center = median(accelerations, 0.0)
+        spread = mad(accelerations, center, 0.0)
+        threshold = max(float(settings.acceleration_minimum), center + (float(settings.acceleration_multiplier) * spread))
+        bad = sum(1 for value in accelerations if value > threshold)
+        if bad >= 2 and (bad / float(len(accelerations))) >= float(settings.acceleration_minimum_ratio):
+            track.disabled = True
+            track.termination_reason = track.termination_reason or "acceleration_jitter"
+
+
+def _filter_local_motion_coherence(tracks: list[TrackCandidate], settings: FilteringSettings) -> None:
+    transitions: dict[tuple[int, int], list[tuple[TrackCandidate, float, float, float, float]]] = {}
+    for track in tracks:
+        if track.disabled:
+            continue
+        samples = track.valid_samples
+        for a, b in zip(samples, samples[1:]):
+            frame_a = int(a.frame)
+            frame_b = int(b.frame)
+            frame_delta = frame_b - frame_a
+            if frame_delta <= 0:
+                continue
+            transitions.setdefault((frame_a, frame_b), []).append(
+                (track, float(a.x), float(a.y), (b.x - a.x) / frame_delta, (b.y - a.y) / frame_delta)
+            )
+
+    bad_counts: dict[str, int] = {}
+    total_counts: dict[str, int] = {}
+    tracks_by_name: dict[str, TrackCandidate] = {}
+    radius2 = max(1.0, float(settings.local_motion_radius)) ** 2
+    minimum_tracks = max(3, int(settings.local_motion_minimum_tracks))
+    minimum_residual = float(settings.local_motion_minimum_residual)
+    multiplier = float(settings.local_motion_multiplier)
+    for items in transitions.values():
+        if len(items) < minimum_tracks:
+            continue
+        for track, x, y, vx, vy in items:
+            key = str(track.id)
+            tracks_by_name[key] = track
+            total_counts[key] = total_counts.get(key, 0) + 1
+            neighbors = [
+                (other_vx, other_vy)
+                for _other, other_x, other_y, other_vx, other_vy in items
+                if (other_x - x) ** 2 + (other_y - y) ** 2 <= radius2
+            ]
+            if len(neighbors) < minimum_tracks:
+                continue
+            median_vx = median([item[0] for item in neighbors], 0.0)
+            median_vy = median([item[1] for item in neighbors], 0.0)
+            residuals = [((item_vx - median_vx) ** 2 + (item_vy - median_vy) ** 2) ** 0.5 for item_vx, item_vy in neighbors]
+            center = median(residuals, 0.0)
+            spread = mad(residuals, center, 0.0)
+            threshold = max(minimum_residual, center + (multiplier * spread))
+            residual = ((vx - median_vx) ** 2 + (vy - median_vy) ** 2) ** 0.5
+            if residual > threshold:
+                bad_counts[key] = bad_counts.get(key, 0) + 1
+
+    minimum_ratio = float(settings.local_motion_minimum_ratio)
+    for key, bad in bad_counts.items():
+        total = max(1, total_counts.get(key, 0))
+        if bad >= 2 and (bad / float(total)) >= minimum_ratio:
+            track = tracks_by_name.get(key)
+            if track is not None:
+                track.disabled = True
+                track.termination_reason = track.termination_reason or "local_motion"
 
 
 def ransac_inlier_rate_for_pair(points_a, points_b, settings: FilteringSettings) -> float:

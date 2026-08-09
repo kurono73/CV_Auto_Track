@@ -41,6 +41,16 @@ USER_DEFAULT_PROPERTY_NAMES = (
     "maximum_motion",
     "enable_forward_backward",
     "maximum_fb_error",
+    "enable_appearance_check",
+    "appearance_patch_size",
+    "minimum_appearance_correlation",
+    "enable_edge_ambiguity_check",
+    "edge_response_patch_size",
+    "minimum_corner_ratio",
+    "enable_silhouette_proximity_check",
+    "silhouette_edge_radius",
+    "silhouette_edge_percentile",
+    "silhouette_minimum_corner_ratio",
     "enable_redetect",
     "adaptive_redetect",
     "redetect_interval",
@@ -70,11 +80,22 @@ USER_DEFAULT_PROPERTY_NAMES = (
     "maximum_tracks_per_cell",
     "minimum_tracks_per_cell",
     "distribution_strength",
+    "enable_acceleration_filter",
+    "acceleration_multiplier",
+    "acceleration_minimum",
+    "acceleration_minimum_ratio",
+    "enable_local_motion_coherence",
+    "local_motion_radius",
+    "local_motion_multiplier",
+    "local_motion_minimum_residual",
+    "local_motion_minimum_tracks",
+    "local_motion_minimum_ratio",
     "use_mask",
     "mask_source",
     "external_mask_channel",
     "auto_solve_refine",
     "auto_solve_keyframes",
+    "auto_scene_setup",
     "bake_pattern_size",
     "bake_search_size",
     "mask_mode",
@@ -220,6 +241,28 @@ class CV_AUTOTRACK_PG_Settings(bpy.types.PropertyGroup):
     maximum_motion: FloatProperty(name="Maximum Motion", description="Maximum per-frame motion before automatic resolution scaling", default=96.0, min=1.0)
     enable_forward_backward: BoolProperty(name="Forward-Backward Check", description="Reject tracks that do not return close to the source point", default=True)
     maximum_fb_error: FloatProperty(name="Maximum FB Error", description="Maximum forward-backward error before automatic resolution scaling", default=1.5, min=0.0)
+    enable_appearance_check: BoolProperty(
+        name="Appearance Check",
+        description="End a track when its local image patch changes abruptly, helping prevent foreground occlusion drift",
+        default=True,
+    )
+    appearance_patch_size: IntProperty(name="Appearance Patch Size", description="Patch size used for local appearance consistency before automatic resolution scaling", default=15, min=5, max=101)
+    minimum_appearance_correlation: FloatProperty(name="Minimum Appearance Correlation", description="Minimum normalized patch or gradient correlation before ending a track", default=0.7, min=-1.0, max=1.0)
+    enable_edge_ambiguity_check: BoolProperty(
+        name="Edge Ambiguity Check",
+        description="Avoid edge-like points whose motion is under-constrained along a silhouette or line",
+        default=True,
+    )
+    edge_response_patch_size: IntProperty(name="Edge Response Patch Size", description="Patch size used to detect edge-like ambiguous points before automatic resolution scaling", default=15, min=5, max=101)
+    minimum_corner_ratio: FloatProperty(name="Minimum Corner Ratio", description="Minimum minor-to-major gradient eigenvalue ratio for accepting a point as corner-like", default=0.10, min=0.0, max=1.0)
+    enable_silhouette_proximity_check: BoolProperty(
+        name="Silhouette Proximity Check",
+        description="Avoid weak corner points near strong silhouette-like edges",
+        default=True,
+    )
+    silhouette_edge_radius: IntProperty(name="Silhouette Edge Radius", description="Pixel radius around strong edges used by silhouette proximity filtering before automatic resolution scaling", default=3, min=0, max=64)
+    silhouette_edge_percentile: FloatProperty(name="Silhouette Edge Percentile", description="Gradient percentile used to classify strong silhouette-like edges", default=88.0, min=0.0, max=100.0)
+    silhouette_minimum_corner_ratio: FloatProperty(name="Silhouette Minimum Corner Ratio", description="Minimum corner ratio required to keep a detected point near a strong edge", default=0.20, min=0.0, max=1.0)
 
     enable_redetect: BoolProperty(name="Periodic Redetect", description="Allow CV Auto Track to add new points during the pass", default=True)
     adaptive_redetect: BoolProperty(name="Adaptive Redetect", description="Add new points when active tracks or screen distribution fall below target", default=True)
@@ -278,6 +321,17 @@ class CV_AUTOTRACK_PG_Settings(bpy.types.PropertyGroup):
     minimum_tracks_per_cell: IntProperty(name="Minimum Tracks Per Cell", description="Minimum active tracks requested per distribution cell", default=3, min=0)
     distribution_strength: FloatProperty(name="Distribution Strength", description="Strength of distribution-aware redetection and pruning", default=1.0, min=0.0, max=1.0)
 
+    enable_acceleration_filter: BoolProperty(name="Acceleration Filter", description="Reject tracks with repeated abrupt velocity changes", default=True)
+    acceleration_multiplier: FloatProperty(name="Acceleration MAD Multiplier", description="Median absolute deviation multiplier for acceleration jitter rejection", default=4.0, min=0.0)
+    acceleration_minimum: FloatProperty(name="Acceleration Minimum", description="Minimum acceleration residual before jitter rejection can disable a track", default=18.0, min=0.0)
+    acceleration_minimum_ratio: FloatProperty(name="Acceleration Minimum Ratio", description="Minimum ratio of jittery motion steps before a track is rejected", default=0.30, min=0.0, max=1.0)
+    enable_local_motion_coherence: BoolProperty(name="Local Motion Coherence", description="Reject generated tracks whose motion disagrees with nearby generated tracks", default=True)
+    local_motion_radius: FloatProperty(name="Local Motion Radius", description="Pixel radius used for local motion coherence before automatic resolution scaling", default=160.0, min=1.0)
+    local_motion_multiplier: FloatProperty(name="Local Motion MAD Multiplier", description="Median absolute deviation multiplier for local motion coherence", default=4.0, min=0.0)
+    local_motion_minimum_residual: FloatProperty(name="Local Motion Minimum Residual", description="Minimum pixel residual before local motion coherence can reject a track", default=16.0, min=0.0)
+    local_motion_minimum_tracks: IntProperty(name="Local Motion Minimum Tracks", description="Minimum nearby generated tracks needed for local motion coherence", default=6, min=3)
+    local_motion_minimum_ratio: FloatProperty(name="Local Motion Minimum Ratio", description="Minimum ratio of incoherent motion steps before a track is rejected", default=0.35, min=0.0, max=1.0)
+
     use_mask: BoolProperty(name="Use Mask", description="Constrain detection and tracking with a Blender Mask or external mask clip", default=False)
     mask_source: EnumProperty(
         name="Mask Source",
@@ -295,6 +349,11 @@ class CV_AUTOTRACK_PG_Settings(bpy.types.PropertyGroup):
     )
     auto_solve_refine: BoolProperty(name="Auto Solve & Refine", description="Run solve refinement after Full Auto Track", default=True)
     auto_solve_keyframes: BoolProperty(name="Auto Keyframe A/B", description="Choose stable solve keyframes automatically and disable Blender Keyframe Selection", default=True)
+    auto_scene_setup: BoolProperty(
+        name="Auto Scene Setup",
+        description="Automatically configure the active scene camera for the solved clip",
+        default=True,
+    )
     bake_pattern_size: IntProperty(name="Bake Pattern Size", description="Pattern Area size used when baking generated Blender markers", default=15, min=1, max=512)
     bake_search_size: IntProperty(name="Bake Search Size", description="Search Area size used when baking generated Blender markers", default=30, min=1, max=1024)
     mask_mode: EnumProperty(

@@ -163,11 +163,10 @@ def _external_mask_info(context, clip, props, frame: int | None) -> tuple[str, s
     path = resolve_blender_path(str(getattr(mask_clip, "filepath", "") or ""), blend_filepath)
     source = str(getattr(mask_clip, "source", "MOVIE"))
     source_frame = max(1, int(frame) if frame is not None else 1)
-    source_start = int(getattr(clip, "frame_start", 1)) if clip is not None else 1
-    mask_start = int(getattr(mask_clip, "frame_start", 1))
-    scene_frame = clip_frame_to_scene_frame(source_frame, source_start)
-    mask_frame = max(1, scene_frame - mask_start + 1)
-    offset_frame = max(1, mask_frame + int(getattr(mask_clip, "frame_offset", 0)))
+    # Treat external mask footage as frame-synced to the source clip at runtime,
+    # even if the user has not pressed the UI sync button.
+    source_offset = int(getattr(clip, "frame_offset", 0)) if clip is not None else 0
+    offset_frame = max(1, source_frame + source_offset)
     if source == "SEQUENCE":
         return ("IMAGE", _sequence_path_for_clip_frame(path, offset_frame), 0)
     movie_index = max(0, offset_frame - 1)

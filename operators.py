@@ -9,7 +9,9 @@ from bpy.props import StringProperty
 
 from . import blender_tracks
 from .dependencies import dependency_status
+from .frame_provider import OpenCVUnsupportedMediaError
 from .properties import USER_DEFAULT_PROPERTY_NAMES
+from .scene_setup import ensure_scene_setup
 from .solve_refinement import analyze_solve, choose_outliers, refine_solve, solve_camera
 from .solve_keyframes import (
     apply_keyframes,
@@ -71,36 +73,156 @@ def _flush_clip_tracking(context, clip) -> None:
         print(f"[CV Auto Track] Clip update skipped: {exc}")
 
 
-def _clip_editor_override(context, clip):
-    area = None
-    region = None
-    space = None
-    for candidate_area in context.window.screen.areas:
-        if candidate_area.type != "CLIP_EDITOR":
+def _clip_editor_spaces(context, clip):
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None) or getattr(context, "screen", None)
+    if screen is None:
+        return []
+    current_area = getattr(context, "area", None)
+    areas = []
+    if current_area is not None:
+        areas.append(current_area)
+    areas.extend(area for area in screen.areas if area is not current_area)
+    result = []
+    for area in areas:
+        if area.type != "CLIP_EDITOR":
             continue
-        candidate_region = next((item for item in candidate_area.regions if item.type == "WINDOW"), None)
-        candidate_space = next((item for item in candidate_area.spaces if item.type == "CLIP_EDITOR"), None)
-        if candidate_region and candidate_space:
-            area = candidate_area
-            region = candidate_region
-            space = candidate_space
-            break
-    if area is None or region is None or space is None:
+        region = next((item for item in area.regions if item.type == "WINDOW"), None)
+        active_space = getattr(area.spaces, "active", None)
+        space = active_space if active_space and active_space.type == "CLIP_EDITOR" else None
+        if space is None:
+            space = next((item for item in area.spaces if item.type == "CLIP_EDITOR"), None)
+        if region is not None and space is not None and (space.clip is None or space.clip == clip):
+            result.append((area, region, space))
+    return result
+
+
+def _pin_active_editor_mask(context, props) -> None:
+    if not bool(getattr(props, "use_mask", False)):
+        return
+    if str(getattr(props, "mask_source", "BLENDER")) != "BLENDER":
+        return
+    if getattr(props, "tracking_mask", None) is not None:
+        return
+    space = getattr(context, "space_data", None)
+    if space and getattr(space, "type", None) == "CLIP_EDITOR":
+        mask = getattr(space, "mask", None)
+        if mask is not None:
+            props.tracking_mask = mask
+
+
+def _ensure_tracking_mode(context, clip, props=None) -> bool:
+    if props is not None:
+        _pin_active_editor_mask(context, props)
+    changed = False
+    for _area, _region, space in _clip_editor_spaces(context, clip):
+        if space.clip is None:
+            space.clip = clip
+        if getattr(space, "mode", "TRACKING") != "TRACKING":
+            try:
+                space.mode = "TRACKING"
+                changed = True
+            except TypeError as exc:
+                raise RuntimeError("Switch the Movie Clip Editor from Mask mode to Tracking mode before running CV Auto Track.") from exc
+    return changed
+
+
+def _clip_editor_override(context, clip):
+    spaces = _clip_editor_spaces(context, clip)
+    if not spaces:
         raise RuntimeError("Movie Clip Editor area is required.")
-    previous_clip = space.clip
-    space.clip = clip
-    return area, region, space, previous_clip
+    candidate_area, candidate_region, candidate_space = spaces[0]
+    previous_clip = candidate_space.clip
+    candidate_space.clip = clip
+    if getattr(candidate_space, "mode", "TRACKING") != "TRACKING":
+        candidate_space.mode = "TRACKING"
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None) or getattr(context, "screen", None)
+    override = {
+        "area": candidate_area,
+        "region": candidate_region,
+        "space_data": candidate_space,
+        "edit_movieclip": clip,
+    }
+    if window is not None:
+        override["window"] = window
+    if screen is not None:
+        override["screen"] = screen
+    return override, candidate_space, previous_clip
 
 
 def _delete_selected_clip_tracks(context, clip):
-    area, region, space, previous_clip = _clip_editor_override(context, clip)
+    override, space, previous_clip = _clip_editor_override(context, clip)
     try:
-        with context.temp_override(area=area, region=region, space_data=space):
+        with context.temp_override(**override):
+            if not bpy.ops.clip.delete_track.poll():
+                raise RuntimeError("bpy.ops.clip.delete_track.poll() failed after CV Auto Track context override.")
             result = bpy.ops.clip.delete_track(confirm=False)
     finally:
         space.clip = previous_clip
     if "FINISHED" not in result:
         raise RuntimeError(f"bpy.ops.clip.delete_track returned {result}.")
+
+
+def _start_proxy_build(context, clip) -> str:
+    proxy = getattr(clip, "proxy", None)
+    if proxy is None:
+        raise RuntimeError("This Movie Clip does not expose Blender proxy settings.")
+    clip.use_proxy = True
+    proxy.build_25 = False
+    proxy.build_50 = False
+    proxy.build_75 = False
+    proxy.build_100 = True
+    proxy.quality = 100
+    override, space, previous_clip = _clip_editor_override(context, clip)
+    try:
+        with context.temp_override(**override):
+            if not bpy.ops.clip.rebuild_proxy.poll():
+                raise RuntimeError("bpy.ops.clip.rebuild_proxy.poll() failed after CV Auto Track context override.")
+            result = bpy.ops.clip.rebuild_proxy()
+    finally:
+        space.clip = previous_clip
+    if "FINISHED" not in result:
+        raise RuntimeError(f"bpy.ops.clip.rebuild_proxy returned {result}.")
+    return "OpenCV cannot read this media. Blender 100% proxy build started; run CV Auto Track again after it finishes."
+
+
+def _request_proxy_build(operator, context, clip, exc) -> set[str]:
+    props = context.scene.cv_autotrack
+    message = "OpenCV cannot read this media. Waiting for proxy build confirmation."
+    props.status_message = message
+    try:
+        result = bpy.ops.clip.cv_autotrack_build_proxy_confirm("INVOKE_DEFAULT", clip_name=clip.name)
+    except Exception as dialog_exc:
+        traceback.print_exc()
+        props.status_message = f"Error: {exc} Proxy confirmation could not be opened: {dialog_exc}"
+        operator.report({"ERROR"}, props.status_message)
+        return {"CANCELLED"}
+    if "RUNNING_MODAL" not in result and "FINISHED" not in result:
+        props.status_message = f"Error: {exc} Proxy confirmation could not be opened."
+        operator.report({"ERROR"}, props.status_message)
+        return {"CANCELLED"}
+    operator.report({"WARNING"}, message)
+    return {"CANCELLED"}
+
+
+def _handle_unsupported_media(operator, context, clip, exc) -> set[str]:
+    return _request_proxy_build(operator, context, clip, exc)
+
+
+def _build_proxy_now(operator, context, clip) -> set[str]:
+    props = context.scene.cv_autotrack
+    try:
+        message = _start_proxy_build(context, clip)
+    except Exception as proxy_exc:
+        traceback.print_exc()
+        message = f"Proxy build could not be started: {proxy_exc}"
+        props.status_message = f"Error: {message}"
+        operator.report({"ERROR"}, message)
+        return {"CANCELLED"}
+    props.status_message = message
+    operator.report({"INFO"}, message)
+    return {"FINISHED"}
 
 
 def _delete_tracks_by_name(context, clip, names, props=None) -> int:
@@ -136,11 +258,27 @@ def _apply_solve_keyframes_from_clip(clip, props) -> None:
         disable_keyframe_selection(clip)
 
 
+def _maybe_auto_scene_setup(operator, context, clip, props) -> None:
+    if not bool(getattr(props, "auto_scene_setup", True)):
+        return
+    try:
+        ensure_scene_setup(context, clip)
+    except Exception as exc:
+        traceback.print_exc()
+        operator.report({"WARNING"}, f"Auto Scene Setup failed: {exc}")
+
+
+def _refine_solve_succeeded(result) -> bool:
+    message = str(getattr(result, "message", "") or "").lower()
+    return bool(message) and "failed" not in message and "returned" not in message and "cancelled" not in message
+
+
 def _run_safely(operator, context, func):
     props = context.scene.cv_autotrack
     props.is_running = True
     props.cancel_requested = False
     props.status_message = "Running"
+    clip = None
     try:
         ok, message = dependency_status()
         if not ok:
@@ -150,7 +288,15 @@ def _run_safely(operator, context, func):
             raise RuntimeError("Movie Clip is not selected.")
         if not clip.filepath:
             raise RuntimeError("Selected Movie Clip has no filepath.")
+        _ensure_tracking_mode(context, clip, props)
         return func(clip, props)
+    except OpenCVUnsupportedMediaError as exc:
+        traceback.print_exc()
+        if clip is not None:
+            return _handle_unsupported_media(operator, context, clip, exc)
+        props.status_message = f"Error: {exc}"
+        operator.report({"ERROR"}, str(exc))
+        return {"CANCELLED"}
     except Exception as exc:
         traceback.print_exc()
         props.status_message = f"Error: {exc}"
@@ -184,6 +330,7 @@ class CV_AUTOTRACK_OT_detect_track(bpy.types.Operator):
                 raise RuntimeError("Movie Clip is not selected in the Clip Editor.")
             if not clip.filepath:
                 raise RuntimeError("Selected Movie Clip has no filepath.")
+            _ensure_tracking_mode(context, clip, props)
             props.is_running = True
             props.cancel_requested = False
             props.status_message = "Starting"
@@ -193,6 +340,15 @@ class CV_AUTOTRACK_OT_detect_track(bpy.types.Operator):
             self._timer = wm.event_timer_add(0.01, window=context.window)
             wm.modal_handler_add(self)
             return {"RUNNING_MODAL"}
+        except OpenCVUnsupportedMediaError as exc:
+            traceback.print_exc()
+            clip = self._session.clip if self._session is not None else active_clip(context)
+            if clip is not None:
+                _handle_unsupported_media(self, context, clip, exc)
+            else:
+                props.status_message = f"Error: {exc}"
+                self.report({"ERROR"}, str(exc))
+            return self._finish_modal(context, cancelled=True, close_session=True, keep_status=True)
         except Exception as exc:
             traceback.print_exc()
             props.status_message = f"Error: {exc}"
@@ -220,6 +376,15 @@ class CV_AUTOTRACK_OT_detect_track(bpy.types.Operator):
                     _store_stats(props, stats)
                     self.report({"INFO"}, f"CV Auto Track generated {stats.generated_tracks} tracks.")
                     return self._finish_modal(context, cancelled=False, close_session=False)
+        except OpenCVUnsupportedMediaError as exc:
+            traceback.print_exc()
+            clip = self._session.clip if self._session is not None else active_clip(context)
+            if clip is not None:
+                _handle_unsupported_media(self, context, clip, exc)
+            else:
+                props.status_message = f"Error: {exc}"
+                self.report({"ERROR"}, str(exc))
+            return self._finish_modal(context, cancelled=True, close_session=True, keep_status=True)
         except Exception as exc:
             traceback.print_exc()
             props.status_message = f"Error: {exc}"
@@ -227,9 +392,9 @@ class CV_AUTOTRACK_OT_detect_track(bpy.types.Operator):
             return self._finish_modal(context, cancelled=True, close_session=True)
         return {"RUNNING_MODAL"}
 
-    def _finish_modal(self, context, cancelled=False, close_session=True):
+    def _finish_modal(self, context, cancelled=False, close_session=True, keep_status=False):
         props = context.scene.cv_autotrack
-        if cancelled and self._session and close_session and not props.status_message.startswith("Error"):
+        if cancelled and self._session and close_session and not keep_status and not props.status_message.startswith("Error"):
             stats = self._session.cancel()
             _store_stats(props, stats)
         if self._timer is not None:
@@ -237,7 +402,7 @@ class CV_AUTOTRACK_OT_detect_track(bpy.types.Operator):
             self._timer = None
         context.window_manager.progress_end()
         props.is_running = False
-        if not props.status_message.startswith("Error") and props.status_message in {"Running", "Starting"}:
+        if not keep_status and not props.status_message.startswith("Error") and props.status_message in {"Running", "Starting"}:
             props.status_message = "Cancelled" if cancelled else "Idle"
         self._session = None
         return {"CANCELLED"} if cancelled else {"FINISHED"}
@@ -359,6 +524,7 @@ class CV_AUTOTRACK_OT_solve_camera(bpy.types.Operator):
             ok, message = solve_camera(context, clip, reset_radial=True)
             if not ok:
                 raise RuntimeError(message)
+            _maybe_auto_scene_setup(self, context, clip, props)
             stats = TrackingStats(
                 valid_tracks=_enabled_track_count(clip),
                 solve_error_after=_solve_error(clip),
@@ -386,6 +552,8 @@ class CV_AUTOTRACK_OT_solve_refine(bpy.types.Operator):
             deleted = 0
             if bool(props.delete_refined_tracks):
                 deleted = _delete_tracks_by_name(context, clip, result.disabled_track_names, props)
+            if _refine_solve_succeeded(result):
+                _maybe_auto_scene_setup(self, context, clip, props)
             stats = TrackingStats(
                 valid_tracks=_enabled_track_count(clip),
                 disabled_tracks=0 if deleted else result.disabled_tracks,
@@ -437,7 +605,9 @@ class CV_AUTOTRACK_OT_solve_setup_dialog(bpy.types.Operator):
         row = box.row(align=True)
         row.prop(settings, "refine_intrinsics_radial_distortion", text="Radial Distortion")
         row.prop(settings, "refine_intrinsics_tangential_distortion", text="Tangential Distortion")
-        box.prop(props, "full_auto_refine_iterations", text="Full Auto Refine Passes")
+        row = box.row(align=True)
+        row.prop(props, "auto_scene_setup", text="Scene Setup")
+        row.prop(props, "full_auto_refine_iterations", text="Refine Passes")
         box = layout.box()
         box.label(text="Camera", icon="CAMERA_DATA")
         row = box.row(align=True)
@@ -452,6 +622,40 @@ class CV_AUTOTRACK_OT_solve_setup_dialog(bpy.types.Operator):
 
     def execute(self, _context):
         return {"FINISHED"}
+
+
+class CV_AUTOTRACK_OT_build_proxy_confirm(bpy.types.Operator):
+    bl_idname = "clip.cv_autotrack_build_proxy_confirm"
+    bl_label = "Build 100% Proxy"
+    bl_description = "Build a Blender 100% proxy when OpenCV cannot read the active footage"
+    bl_options = {"REGISTER", "UNDO"}
+
+    clip_name: StringProperty(name="Movie Clip")
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self, width=360)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.label(text="OpenCV cannot read this media.", icon="ERROR")
+        layout.label(text="Build a Blender 100% proxy now?")
+        layout.label(text="Run CV Auto Track again after the proxy finishes.")
+        if self.clip_name:
+            layout.separator()
+            layout.label(text=f"Clip: {self.clip_name}")
+
+    def execute(self, context):
+        clip = bpy.data.movieclips.get(self.clip_name) if self.clip_name else active_clip(context)
+        if clip is None:
+            self.report({"ERROR"}, "Movie Clip is not selected.")
+            context.scene.cv_autotrack.status_message = "Error: Movie Clip is not selected."
+            return {"CANCELLED"}
+        return _build_proxy_now(self, context, clip)
+
+    def cancel(self, context):
+        message = "Proxy build cancelled."
+        context.scene.cv_autotrack.status_message = message
+        self.report({"INFO"}, message)
 
 
 class CV_AUTOTRACK_OT_load_external_mask_clip(bpy.types.Operator):
@@ -541,6 +745,7 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
                 raise RuntimeError("Movie Clip is not selected in the Clip Editor.")
             if not clip.filepath:
                 raise RuntimeError("Selected Movie Clip has no filepath.")
+            _ensure_tracking_mode(context, clip, props)
             use_existing_autotrack = _full_auto_reuses_existing_autotrack(props) and _autotrack_track_count(clip) > 0
             if use_existing_autotrack or props.tracking_direction not in {"FORWARD", "AUTO"}:
                 return self.execute(context)
@@ -554,6 +759,15 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
             self._timer = wm.event_timer_add(0.01, window=context.window)
             wm.modal_handler_add(self)
             return {"RUNNING_MODAL"}
+        except OpenCVUnsupportedMediaError as exc:
+            traceback.print_exc()
+            clip = self._session.clip if self._session is not None else active_clip(context)
+            if clip is not None:
+                _handle_unsupported_media(self, context, clip, exc)
+            else:
+                props.status_message = f"Error: {exc}"
+                self.report({"ERROR"}, str(exc))
+            return self._finish_modal(context, cancelled=True, close_session=True, keep_status=True)
         except Exception as exc:
             traceback.print_exc()
             props.status_message = f"Error: {exc}"
@@ -598,6 +812,15 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
                     _store_stats(props, stats)
                     self.report({"INFO"}, "Full Auto Track finished.")
                     return self._finish_modal(context, cancelled=False, close_session=False, keep_status=True)
+        except OpenCVUnsupportedMediaError as exc:
+            traceback.print_exc()
+            clip = self._session.clip if self._session is not None else active_clip(context)
+            if clip is not None:
+                _handle_unsupported_media(self, context, clip, exc)
+            else:
+                props.status_message = f"Error: {exc}"
+                self.report({"ERROR"}, str(exc))
+            return self._finish_modal(context, cancelled=True, close_session=True, keep_status=True)
         except Exception as exc:
             traceback.print_exc()
             props.status_message = f"Error: {exc}"
@@ -612,7 +835,7 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
 
     def _finish_modal(self, context, cancelled=False, close_session=True, keep_status=False):
         props = context.scene.cv_autotrack
-        if cancelled and self._session and close_session and not props.status_message.startswith("Error"):
+        if cancelled and self._session and close_session and not keep_status and not props.status_message.startswith("Error"):
             stats = self._session.cancel()
             _store_stats(props, stats)
         self._remove_timer(context)
@@ -658,6 +881,8 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
             deleted = 0
             if bool(props.delete_refined_tracks):
                 deleted = _delete_tracks_by_name(context, clip, refine.disabled_track_names, props)
+            if _refine_solve_succeeded(refine):
+                _maybe_auto_scene_setup(self, context, clip, props)
             stats.solve_error_before = refine.solve_error_before
             stats.solve_error_after = refine.solve_error_after
             stats.refine_iterations = refine.iterations
@@ -788,20 +1013,14 @@ class CV_AUTOTRACK_OT_restore_previous_state(bpy.types.Operator):
             self.report({"ERROR"}, "Movie Clip is not selected.")
             return {"CANCELLED"}
         try:
+            _ensure_tracking_mode(context, clip, context.scene.cv_autotrack)
             delete_count = blender_tracks.select_autotrack_tracks_for_deletion(clip)
             if delete_count == 0:
                 final_message = "No CV Auto Track tracks to delete."
                 self.report({"INFO"}, final_message)
                 context.scene.cv_autotrack.status_message = final_message
                 return {"FINISHED"}
-            area, region, space, previous_clip = _clip_editor_override(context, clip)
-            try:
-                with context.temp_override(area=area, region=region, space_data=space):
-                    result = bpy.ops.clip.delete_track(confirm=False)
-            finally:
-                space.clip = previous_clip
-            if "FINISHED" not in result:
-                raise RuntimeError(f"bpy.ops.clip.delete_track returned {result}.")
+            _delete_selected_clip_tracks(context, clip)
             final_message = f"Deleted {delete_count} CV Auto Track tracks."
             self.report({"INFO"}, final_message)
             context.scene.cv_autotrack.status_message = final_message
@@ -878,6 +1097,7 @@ classes = (
     CV_AUTOTRACK_OT_solve_camera,
     CV_AUTOTRACK_OT_solve_refine,
     CV_AUTOTRACK_OT_solve_setup_dialog,
+    CV_AUTOTRACK_OT_build_proxy_confirm,
     CV_AUTOTRACK_OT_load_external_mask_clip,
     CV_AUTOTRACK_OT_sync_external_mask_clip,
     CV_AUTOTRACK_OT_full_auto_track,

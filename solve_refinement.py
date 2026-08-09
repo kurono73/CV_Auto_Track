@@ -37,13 +37,26 @@ def solve_camera(context, clip, reset_radial: bool = False) -> tuple[bool, str]:
     if area is None:
         return False, "Movie Clip Editor area is required to run Blender's camera solver."
     region = next((region for region in area.regions if region.type == "WINDOW"), None)
-    space = next((space for space in area.spaces if space.type == "CLIP_EDITOR"), None)
+    active_space = getattr(area.spaces, "active", None)
+    space = active_space if active_space and active_space.type == "CLIP_EDITOR" else None
+    if space is None:
+        space = next((space for space in area.spaces if space.type == "CLIP_EDITOR"), None)
     if region is None or space is None:
         return False, "Movie Clip Editor context is incomplete."
     previous_clip = space.clip
     space.clip = clip
+    if getattr(space, "mode", "TRACKING") != "TRACKING":
+        space.mode = "TRACKING"
+    override = {
+        "window": context.window,
+        "screen": context.window.screen,
+        "area": area,
+        "region": region,
+        "space_data": space,
+        "edit_movieclip": clip,
+    }
     try:
-        with context.temp_override(area=area, region=region, space_data=space):
+        with context.temp_override(**override):
             result = bpy.ops.clip.solve_camera()
     except Exception as exc:
         return False, f"Camera solve failed: {type(exc).__name__}: {exc}"

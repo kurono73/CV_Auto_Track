@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .dependencies import ensure_numpy_cv2
+from .feature_quality import extract_patch, is_edge_ambiguous
 from .tracking_types import TrackSample
 from .utils import is_finite_point
 
@@ -19,6 +20,12 @@ class LKSettings:
     maximum_motion: float = 96.0
     edge_margin: int = 16
     enable_forward_backward: bool = True
+    enable_appearance_check: bool = True
+    appearance_patch_size: int = 15
+    minimum_appearance_correlation: float = 0.7
+    enable_edge_ambiguity_check: bool = True
+    edge_response_patch_size: int = 15
+    minimum_corner_ratio: float = 0.10
 
 
 def _point_inside(x: float, y: float, width: int, height: int, margin: int) -> bool:
@@ -72,6 +79,12 @@ def track_point_sequence(
         motion = ((x - previous_x) ** 2 + (y - previous_y) ** 2) ** 0.5
         if motion > settings.maximum_motion:
             termination = "maximum_motion"
+            break
+        if _edge_ambiguous(gray_b, x, y, settings):
+            termination = "edge_ambiguity"
+            break
+        if _appearance_changed(gray_a, gray_b, previous_x, previous_y, x, y, settings):
+            termination = "appearance_change"
             break
 
         fb_error = None
@@ -172,6 +185,10 @@ def track_points_batch(
                     fb_errors[local_index] = fb_error
                     if fb_error > settings.maximum_fb_error:
                         reason = "fb_error"
+            if reason is None and _appearance_changed(gray_a, gray_b, previous_x, previous_y, x, y, settings):
+                reason = "appearance_change"
+            if reason is None and _edge_ambiguous(gray_b, x, y, settings):
+                reason = "edge_ambiguity"
             if reason is None:
                 samples[track_index].append(
                     TrackSample(frame_b, x, y, lk_error=lk_error, fb_error=fb_error, valid=True)
@@ -241,6 +258,10 @@ def track_points_step(gray_a, gray_b, points: list[tuple[float, float]], setting
                 fb_error = ((bx - previous_x) ** 2 + (by - previous_y) ** 2) ** 0.5
                 if fb_error > settings.maximum_fb_error:
                     reason = "fb_error"
+        if reason is None and _appearance_changed(gray_a, gray_b, previous_x, previous_y, x, y, settings):
+            reason = "appearance_change"
+        if reason is None and _edge_ambiguous(gray_b, x, y, settings):
+            reason = "edge_ambiguity"
         results.append((x, y, lk_error, fb_error, reason))
     return results
 
@@ -258,3 +279,80 @@ def _sample_failure_reason(status, x, y, width, height, previous_x, previous_y, 
     if motion > settings.maximum_motion:
         return "maximum_motion"
     return None
+
+
+def _appearance_changed(gray_a, gray_b, previous_x: float, previous_y: float, x: float, y: float, settings: LKSettings) -> bool:
+    if not bool(getattr(settings, "enable_appearance_check", True)):
+        return False
+    threshold = float(getattr(settings, "minimum_appearance_correlation", 0.45))
+    if threshold <= -1.0:
+        return False
+    similarity = _patch_correlation(
+        gray_a,
+        gray_b,
+        previous_x,
+        previous_y,
+        x,
+        y,
+        int(getattr(settings, "appearance_patch_size", 15)),
+    )
+    return similarity is not None and similarity < threshold
+
+
+def _edge_ambiguous(gray, x: float, y: float, settings: LKSettings) -> bool:
+    if not bool(getattr(settings, "enable_edge_ambiguity_check", True)):
+        return False
+    return is_edge_ambiguous(
+        gray,
+        x,
+        y,
+        int(getattr(settings, "edge_response_patch_size", 15)),
+        float(getattr(settings, "minimum_corner_ratio", 0.10)),
+    )
+
+
+def _patch_correlation(gray_a, gray_b, ax: float, ay: float, bx: float, by: float, size: int) -> float | None:
+    size = max(5, int(size))
+    if size % 2 == 0:
+        size += 1
+    patch_a = _extract_patch(gray_a, ax, ay, size)
+    patch_b = _extract_patch(gray_b, bx, by, size)
+    if patch_a is None or patch_b is None:
+        return None
+    a = patch_a.astype("float32", copy=False)
+    b = patch_b.astype("float32", copy=False)
+    raw_score = _normalized_correlation(a, b)
+    gradient_score = _normalized_correlation(_gradient_magnitude(a), _gradient_magnitude(b))
+    scores = [score for score in (raw_score, gradient_score) if score is not None]
+    if not scores:
+        return None
+    return max(scores)
+
+
+def _normalized_correlation(a, b) -> float | None:
+    if a.shape != b.shape or a.size == 0:
+        return None
+    a = a - float(a.mean())
+    b = b - float(b.mean())
+    energy_a = float((a * a).sum())
+    energy_b = float((b * b).sum())
+    if energy_a <= 1e-6 and energy_b <= 1e-6:
+        return 1.0
+    if energy_a <= 1e-6 or energy_b <= 1e-6:
+        return 0.0
+    denom = float((energy_a * energy_b) ** 0.5)
+    if denom <= 1e-6:
+        return None
+    return float((a * b).sum() / denom)
+
+
+def _extract_patch(gray, x: float, y: float, size: int):
+    return extract_patch(gray, x, y, size)
+
+
+def _gradient_magnitude(patch):
+    if patch.shape[0] < 3 or patch.shape[1] < 3:
+        return patch
+    dx = patch[1:-1, 2:] - patch[1:-1, :-2]
+    dy = patch[2:, 1:-1] - patch[:-2, 1:-1]
+    return (dx * dx + dy * dy) ** 0.5

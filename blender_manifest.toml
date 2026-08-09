@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "cv_autotrack"
-version = "1.0.0"
+version = "1.0.1"
 name = "CV Auto Track"
 tagline = "Fast OpenCV auto tracking with solve refinement"
 maintainer = "Naoki Korematsu"

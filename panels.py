@@ -101,18 +101,20 @@ class CV_AUTOTRACK_PT_main(bpy.types.Panel):
         layout.separator()
         box = layout.box()
         box.label(text="Track", icon="TRACKING")
-        row = box.row(align=True)
         if props.is_running:
+            row = box.row(align=True)
+            row.scale_y = 1.8
             row.operator("clip.cv_autotrack_cancel", text="Cancel", icon="CANCEL")
         else:
+            row = box.row(align=True)
             row.operator("clip.cv_autotrack_detect_track", text="Generate Tracks", icon="LIGHTPROBE_VOLUME")
-        row.operator("clip.cv_autotrack_add_cached_tracks", text="", icon="ADD")
-        row = box.row(align=True)
-        row.scale_y = 1.8
-        row.operator("clip.cv_autotrack_full_auto_track", text="Run Auto Track", icon="PLAY")
-        refine_icon = _available_icon("GESTURE_ROTATE") if props.auto_solve_refine else "RADIOBUT_OFF"
-        row.operator("clip.cv_autotrack_toggle_auto_refine", text="", icon=refine_icon)
-        _labeled_prop(box, props, "track_replace_mode", "Mode", factor=0.28)
+            row.operator("clip.cv_autotrack_add_cached_tracks", text="", icon="ADD")
+            row = box.row(align=True)
+            row.scale_y = 1.8
+            row.operator("clip.cv_autotrack_full_auto_track", text="Run Auto Track", icon="PLAY")
+            refine_icon = _available_icon("GESTURE_ROTATE") if props.auto_solve_refine else "RADIOBUT_OFF"
+            row.operator("clip.cv_autotrack_toggle_auto_refine", text="", icon=refine_icon)
+            _labeled_prop(box, props, "track_replace_mode", "Mode", factor=0.28)
         box = layout.box()
         box.label(text="Refine", icon="MODIFIER")
         row = box.row(align=True)
@@ -262,6 +264,19 @@ class CV_AUTOTRACK_PT_tracking(bpy.types.Panel):
         layout.prop(props, "enable_forward_backward", text="FB Check")
         if props.enable_forward_backward:
             layout.prop(props, "maximum_fb_error", text="Max FB Error")
+        layout.prop(props, "enable_appearance_check", text="Appearance Check")
+        if props.enable_appearance_check:
+            layout.prop(props, "appearance_patch_size", text="Patch Size")
+            layout.prop(props, "minimum_appearance_correlation", text="Min Correlation")
+        layout.prop(props, "enable_edge_ambiguity_check", text="Edge Ambiguity")
+        if props.enable_edge_ambiguity_check:
+            layout.prop(props, "edge_response_patch_size", text="Edge Patch")
+            layout.prop(props, "minimum_corner_ratio", text="Min Corner Ratio")
+        layout.prop(props, "enable_silhouette_proximity_check", text="Silhouette Proximity")
+        if props.enable_silhouette_proximity_check:
+            layout.prop(props, "silhouette_edge_radius", text="Edge Radius")
+            layout.prop(props, "silhouette_edge_percentile", text="Edge Percentile")
+            layout.prop(props, "silhouette_minimum_corner_ratio", text="Min Corner Ratio")
 
 
 class CV_AUTOTRACK_PT_filtering(bpy.types.Panel):
@@ -286,6 +301,18 @@ class CV_AUTOTRACK_PT_filtering(bpy.types.Panel):
         layout.prop(props, "preferred_track_length", text="Preferred Len")
         layout.prop(props, "minimum_valid_ratio", text="Valid Ratio")
         layout.prop(props, "duplicate_distance", text="Duplicate Dist")
+        layout.prop(props, "enable_acceleration_filter", text="Acceleration")
+        if props.enable_acceleration_filter:
+            layout.prop(props, "acceleration_multiplier", text="Accel MAD")
+            layout.prop(props, "acceleration_minimum", text="Accel Residual")
+            layout.prop(props, "acceleration_minimum_ratio", text="Accel Ratio")
+        layout.prop(props, "enable_local_motion_coherence", text="Local Motion")
+        if props.enable_local_motion_coherence:
+            layout.prop(props, "local_motion_radius", text="Local Radius")
+            layout.prop(props, "local_motion_multiplier", text="Local MAD")
+            layout.prop(props, "local_motion_minimum_residual", text="Local Residual")
+            layout.prop(props, "local_motion_minimum_tracks", text="Local Min")
+            layout.prop(props, "local_motion_minimum_ratio", text="Local Ratio")
         layout.prop(props, "maximum_track_error", text="Max Track Error")
         layout.prop(props, "mad_multiplier", text="MAD")
         layout.prop(props, "outlier_percentage_per_iteration", text="Outlier %")

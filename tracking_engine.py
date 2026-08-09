@@ -456,7 +456,12 @@ def _run_detection_batches(context, clip, props, provider, frames, stats, cancel
         if props.detect_only_when_needed and len(active) >= int(minimum_active_tracks) and not underfilled_cells:
             points = []
         distribution_deficit = _cell_deficit(underfilled_cells, active, width, height, props)
-        points = points[: max(0, max(int(target_track_count) - len(active), distribution_deficit))]
+        remaining_budget = max(0, int(track_budget) - len(candidates))
+        selection_limit = min(
+            remaining_budget,
+            max(0, max(int(target_track_count) - len(active), distribution_deficit)),
+        )
+        points = points[:selection_limit]
         if progress_cb:
             progress_cb(batch_id - 1, len(detection_frames), f"Detected {len(points)} points at frame {detection_frame}")
         def batch_progress(current, total, active_count):
@@ -1243,9 +1248,11 @@ def _delete_autotrack_tracks(context, clip) -> int:
     override = _clip_editor_override(context, clip)
     if override is None:
         raise RuntimeError("Movie Clip Editor area is required to replace existing CV Auto Track tracks.")
-    area, region, space, previous_clip = override
+    override_args, space, previous_clip = override
     try:
-        with context.temp_override(area=area, region=region, space_data=space):
+        with context.temp_override(**override_args):
+            if not bpy.ops.clip.delete_track.poll():
+                raise RuntimeError("bpy.ops.clip.delete_track.poll() failed after CV Auto Track context override.")
             result = bpy.ops.clip.delete_track(confirm=False)
     finally:
         space.clip = previous_clip
@@ -1256,19 +1263,39 @@ def _delete_autotrack_tracks(context, clip) -> int:
 
 def _clip_editor_override(context, clip):
     window = getattr(context, "window", None)
-    screen = getattr(window, "screen", None)
+    screen = getattr(window, "screen", None) or getattr(context, "screen", None)
     if screen is None:
         return None
-    for area in screen.areas:
+    current_area = getattr(context, "area", None)
+    areas = []
+    if current_area is not None:
+        areas.append(current_area)
+    areas.extend(area for area in screen.areas if area is not current_area)
+    for area in areas:
         if area.type != "CLIP_EDITOR":
             continue
         region = next((item for item in area.regions if item.type == "WINDOW"), None)
-        space = next((item for item in area.spaces if item.type == "CLIP_EDITOR"), None)
+        active_space = getattr(area.spaces, "active", None)
+        space = active_space if active_space and active_space.type == "CLIP_EDITOR" else None
+        if space is None:
+            space = next((item for item in area.spaces if item.type == "CLIP_EDITOR"), None)
         if region is None or space is None:
             continue
         previous_clip = space.clip
         space.clip = clip
-        return area, region, space, previous_clip
+        if getattr(space, "mode", "TRACKING") != "TRACKING":
+            space.mode = "TRACKING"
+        override = {
+            "area": area,
+            "region": region,
+            "space_data": space,
+            "edit_movieclip": clip,
+        }
+        if window is not None:
+            override["window"] = window
+        if screen is not None:
+            override["screen"] = screen
+        return override, space, previous_clip
     return None
 
 
@@ -1297,6 +1324,13 @@ def _detection_settings(props, provider=None) -> DetectionSettings:
         use_harris_detector=bool(props.use_harris_detector),
         harris_k=float(props.harris_k),
         edge_margin=_scale_int(props.edge_margin, scale),
+        enable_edge_ambiguity_check=bool(getattr(props, "enable_edge_ambiguity_check", True)),
+        edge_response_patch_size=_scale_odd_int(getattr(props, "edge_response_patch_size", 15), scale, minimum=5),
+        minimum_corner_ratio=float(getattr(props, "minimum_corner_ratio", 0.10)),
+        enable_silhouette_proximity_check=bool(getattr(props, "enable_silhouette_proximity_check", True)),
+        silhouette_edge_radius=_scale_int(getattr(props, "silhouette_edge_radius", 3), scale),
+        silhouette_edge_percentile=float(getattr(props, "silhouette_edge_percentile", 88.0)),
+        silhouette_minimum_corner_ratio=float(getattr(props, "silhouette_minimum_corner_ratio", 0.20)),
         grid_columns=int(props.grid_columns),
         grid_rows=int(props.grid_rows),
         max_per_cell=int(props.maximum_tracks_per_cell),
@@ -1316,6 +1350,12 @@ def _lk_settings(props, provider=None) -> LKSettings:
         maximum_motion=_scale_float(props.maximum_motion, scale),
         edge_margin=_scale_int(props.edge_margin, scale),
         enable_forward_backward=bool(props.enable_forward_backward),
+        enable_appearance_check=bool(getattr(props, "enable_appearance_check", True)),
+        appearance_patch_size=_scale_odd_int(getattr(props, "appearance_patch_size", 15), scale, minimum=5),
+        minimum_appearance_correlation=float(getattr(props, "minimum_appearance_correlation", 0.45)),
+        enable_edge_ambiguity_check=bool(getattr(props, "enable_edge_ambiguity_check", True)),
+        edge_response_patch_size=_scale_odd_int(getattr(props, "edge_response_patch_size", 15), scale, minimum=5),
+        minimum_corner_ratio=float(getattr(props, "minimum_corner_ratio", 0.10)),
     )
 
 
@@ -1331,6 +1371,16 @@ def _filtering_settings(props, provider=None) -> FilteringSettings:
         ransac_confidence=float(props.ransac_confidence),
         ransac_minimum_points=int(props.ransac_minimum_points),
         duplicate_distance=_scale_float(props.duplicate_distance, scale),
+        enable_acceleration_filter=bool(getattr(props, "enable_acceleration_filter", True)),
+        acceleration_multiplier=float(getattr(props, "acceleration_multiplier", 4.0)),
+        acceleration_minimum=_scale_float(getattr(props, "acceleration_minimum", 18.0), scale),
+        acceleration_minimum_ratio=float(getattr(props, "acceleration_minimum_ratio", 0.30)),
+        enable_local_motion_coherence=bool(getattr(props, "enable_local_motion_coherence", True)),
+        local_motion_radius=_scale_float(getattr(props, "local_motion_radius", 160.0), scale),
+        local_motion_multiplier=float(getattr(props, "local_motion_multiplier", 4.0)),
+        local_motion_minimum_residual=_scale_float(getattr(props, "local_motion_minimum_residual", 16.0), scale),
+        local_motion_minimum_tracks=int(getattr(props, "local_motion_minimum_tracks", 6)),
+        local_motion_minimum_ratio=float(getattr(props, "local_motion_minimum_ratio", 0.35)),
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .dependencies import ensure_numpy_cv2
+from .feature_quality import corner_ratio, is_edge_ambiguous
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +16,13 @@ class DetectionSettings:
     use_harris_detector: bool = False
     harris_k: float = 0.04
     edge_margin: int = 16
+    enable_edge_ambiguity_check: bool = True
+    edge_response_patch_size: int = 15
+    minimum_corner_ratio: float = 0.10
+    enable_silhouette_proximity_check: bool = True
+    silhouette_edge_radius: int = 3
+    silhouette_edge_percentile: float = 88.0
+    silhouette_minimum_corner_ratio: float = 0.20
     grid_columns: int = 8
     grid_rows: int = 5
     max_per_cell: int = 20
@@ -56,11 +64,14 @@ def detect_shi_tomasi(
     detector_type = str(getattr(settings, "detector_type", "SHI_TOMASI"))
     if detector_type != "SHI_TOMASI":
         points = _detect_keypoints(gray, mask, settings, cv2)
-        return limit_points_per_grid(points, width, height, settings)
+        points = _filter_detection_quality(gray, points, settings, cv2, np)
+        return limit_points_per_grid(points, width, height, settings)[: max(1, int(settings.maximum_features))]
 
+    maximum = max(1, int(settings.maximum_features))
+    request_count = maximum * (2 if bool(getattr(settings, "enable_edge_ambiguity_check", True)) else 1)
     pts = cv2.goodFeaturesToTrack(
         gray,
-        maxCorners=max(1, int(settings.maximum_features)),
+        maxCorners=request_count,
         qualityLevel=max(0.000001, float(settings.quality_level)),
         minDistance=max(1.0, float(settings.minimum_distance)),
         mask=mask,
@@ -72,22 +83,24 @@ def detect_shi_tomasi(
         return []
 
     points = [(float(p[0][0]), float(p[0][1])) for p in pts]
-    return limit_points_per_grid(points, width, height, settings)
+    points = _filter_detection_quality(gray, points, settings, cv2, np)
+    return limit_points_per_grid(points, width, height, settings)[:maximum]
 
 
 def _detect_keypoints(gray, mask, settings: DetectionSettings, cv2) -> list[tuple[float, float]]:
     detector_type = str(settings.detector_type)
     maximum = max(1, int(settings.maximum_features))
+    request_maximum = maximum * (2 if bool(getattr(settings, "enable_edge_ambiguity_check", True)) else 1)
     if detector_type == "SIFT" and hasattr(cv2, "SIFT_create"):
         detector = cv2.SIFT_create(
-            nfeatures=maximum,
+            nfeatures=request_maximum,
             contrastThreshold=max(0.0001, float(settings.quality_level)),
             edgeThreshold=max(1, int(settings.block_size) * 2),
         )
         keypoints = detector.detect(gray, mask)
     elif detector_type == "ORB" and hasattr(cv2, "ORB_create"):
         detector = cv2.ORB_create(
-            nfeatures=maximum,
+            nfeatures=request_maximum,
             edgeThreshold=max(1, int(settings.edge_margin)),
             fastThreshold=max(1, min(255, int(round(float(settings.quality_level) * 1000.0)))),
         )
@@ -103,7 +116,69 @@ def _detect_keypoints(gray, mask, settings: DetectionSettings, cv2) -> list[tupl
     if keypoints is None:
         return []
     keypoints = sorted(keypoints, key=lambda item: float(getattr(item, "response", 0.0)), reverse=True)
-    return _spaced_keypoints(keypoints, maximum, max(1.0, float(settings.minimum_distance)))
+    return _spaced_keypoints(keypoints, request_maximum, max(1.0, float(settings.minimum_distance)))
+
+
+def _filter_edge_ambiguous_points(gray, points: list[tuple[float, float]], settings: DetectionSettings) -> list[tuple[float, float]]:
+    if not bool(getattr(settings, "enable_edge_ambiguity_check", True)):
+        return points
+    size = int(getattr(settings, "edge_response_patch_size", 15))
+    minimum_ratio = float(getattr(settings, "minimum_corner_ratio", 0.10))
+    return [
+        (x, y)
+        for x, y in points
+        if not is_edge_ambiguous(gray, x, y, size, minimum_ratio)
+    ]
+
+
+def _filter_detection_quality(gray, points: list[tuple[float, float]], settings: DetectionSettings, cv2, np) -> list[tuple[float, float]]:
+    points = _filter_edge_ambiguous_points(gray, points, settings)
+    if not bool(getattr(settings, "enable_silhouette_proximity_check", True)):
+        return points
+    edge_mask = _strong_edge_proximity_mask(
+        gray,
+        cv2,
+        np,
+        int(getattr(settings, "silhouette_edge_radius", 3)),
+        float(getattr(settings, "silhouette_edge_percentile", 88.0)),
+    )
+    if edge_mask is None:
+        return points
+    size = int(getattr(settings, "edge_response_patch_size", 15))
+    minimum_ratio = float(getattr(settings, "silhouette_minimum_corner_ratio", 0.20))
+    height, width = gray.shape[:2]
+    kept = []
+    for x, y in points:
+        xi = max(0, min(width - 1, int(round(float(x)))))
+        yi = max(0, min(height - 1, int(round(float(y)))))
+        if int(edge_mask[yi, xi]) and (corner_ratio(gray, x, y, size) or 0.0) < minimum_ratio:
+            continue
+        kept.append((x, y))
+    return kept
+
+
+def _strong_edge_proximity_mask(gray, cv2, np, radius: int, percentile: float):
+    if gray.size == 0:
+        return None
+    item = gray.astype("float32", copy=False)
+    gx = np.zeros_like(item)
+    gy = np.zeros_like(item)
+    gx[:, 1:-1] = item[:, 2:] - item[:, :-2]
+    gy[1:-1, :] = item[2:, :] - item[:-2, :]
+    magnitude = (gx * gx + gy * gy) ** 0.5
+    nonzero = magnitude[magnitude > 0.0]
+    if nonzero.size == 0:
+        return None
+    threshold = float(np.percentile(nonzero, max(0.0, min(100.0, float(percentile)))))
+    if threshold <= 0.0:
+        return None
+    mask = (magnitude >= threshold).astype("uint8") * 255
+    radius = max(0, int(radius))
+    if radius > 0:
+        size = (radius * 2) + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+        mask = cv2.dilate(mask, kernel)
+    return mask
 
 
 def _spaced_keypoints(keypoints, maximum: int, minimum_distance: float) -> list[tuple[float, float]]:
