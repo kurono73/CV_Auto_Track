@@ -4,7 +4,6 @@ import re
 from pathlib import Path
 
 from .compatibility import clip_frame_to_scene_frame, resolve_blender_path
-from .dependencies import ensure_numpy_cv2
 
 _MASK_CACHE: dict[tuple, object] = {}
 _MASK_CACHE_LIMIT = 256
@@ -36,7 +35,8 @@ def build_detection_mask(context, clip, props, width: int, height: int, np, fram
     if not bool(getattr(props, "use_mask", False)):
         return np.full((height, width), 255, dtype=np.uint8)
 
-    _, cv2 = ensure_numpy_cv2()
+    import cv2
+
     if getattr(props, "mask_source", "BLENDER") == "EXTERNAL":
         mask_data = None
         cache_key = _cache_key(context, mask_data, clip, props, width, height, frame)

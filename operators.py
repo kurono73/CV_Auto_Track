@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import traceback
 import time
@@ -8,7 +8,6 @@ import bpy
 from bpy.props import StringProperty
 
 from . import blender_tracks
-from .dependencies import dependency_status
 from .frame_provider import OpenCVUnsupportedMediaError
 from .properties import USER_DEFAULT_PROPERTY_NAMES
 from .scene_setup import ensure_scene_setup
@@ -273,6 +272,14 @@ def _refine_solve_succeeded(result) -> bool:
     return bool(message) and "failed" not in message and "returned" not in message and "cancelled" not in message
 
 
+def _opencv_status() -> tuple[bool, str]:
+    try:
+        import cv2
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, f"OpenCV {cv2.__version__}"
+
+
 def _run_safely(operator, context, func):
     props = context.scene.cv_autotrack
     props.is_running = True
@@ -280,7 +287,7 @@ def _run_safely(operator, context, func):
     props.status_message = "Running"
     clip = None
     try:
-        ok, message = dependency_status()
+        ok, message = _opencv_status()
         if not ok:
             raise RuntimeError(f"OpenCV dependency import failed: {message}")
         clip = active_clip(context)
@@ -322,7 +329,7 @@ class CV_AUTOTRACK_OT_detect_track(bpy.types.Operator):
         if props.tracking_direction not in {"FORWARD", "AUTO"}:
             return self.execute(context)
         try:
-            ok, message = dependency_status()
+            ok, message = _opencv_status()
             if not ok:
                 raise RuntimeError(f"OpenCV dependency import failed: {message}")
             clip = active_clip(context)
@@ -737,7 +744,7 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
     def invoke(self, context, _event):
         props = context.scene.cv_autotrack
         try:
-            ok, message = dependency_status()
+            ok, message = _opencv_status()
             if not ok:
                 raise RuntimeError(f"OpenCV dependency import failed: {message}")
             clip = active_clip(context)

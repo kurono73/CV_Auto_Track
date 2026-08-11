@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .compatibility import resolve_blender_path
-from .dependencies import ensure_numpy_cv2
 
 
 class OpenCVUnsupportedMediaError(RuntimeError):
@@ -33,10 +32,13 @@ class FrameProvider:
         minimum_analysis_width: int = 1,
         minimum_analysis_height: int = 1,
     ):
+        import cv2
+        import numpy as np
+
         self.clip = clip
         self.cache_size = max(2, int(cache_size))
         self.cache: OrderedDict[int, object] = OrderedDict()
-        self.np, self.cv2 = ensure_numpy_cv2()
+        self.np, self.cv2 = np, cv2
         self.blend_filepath = str(blend_filepath or "")
         self.filepath = resolve_blender_path(str(clip.filepath), blend_filepath)
         self.source = str(getattr(clip, "source", "MOVIE"))

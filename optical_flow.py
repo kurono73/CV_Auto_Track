@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .dependencies import ensure_numpy_cv2
 from .feature_quality import extract_patch, is_edge_ambiguous
 from .tracking_types import TrackSample
 from .utils import is_finite_point
@@ -37,7 +36,9 @@ def track_point_sequence(
     start_point: tuple[float, float],
     settings: LKSettings,
 ) -> tuple[list[TrackSample], str | None]:
-    np, cv2 = ensure_numpy_cv2()
+    import cv2
+    import numpy as np
+
     if len(frames) < 1:
         return [], "no_frames"
     samples = [TrackSample(frames[0][0], float(start_point[0]), float(start_point[1]), valid=True)]
@@ -112,7 +113,9 @@ def track_points_batch(
     progress_cb=None,
 ) -> tuple[list[list[TrackSample]], list[str | None]]:
     """Track many points through an ordered frame sequence with one LK call per frame pair."""
-    np, cv2 = ensure_numpy_cv2()
+    import cv2
+    import numpy as np
+
     if not frames:
         return [], []
     if not start_points:
@@ -208,7 +211,9 @@ def track_points_batch(
 
 def track_points_step(gray_a, gray_b, points: list[tuple[float, float]], settings: LKSettings):
     """Track many points across one frame pair."""
-    np, cv2 = ensure_numpy_cv2()
+    import cv2
+    import numpy as np
+
     if not points:
         return []
     point_array = np.asarray(points, dtype=np.float32).reshape((-1, 1, 2))

@@ -3,7 +3,14 @@ from __future__ import annotations
 import bpy
 
 from .constants import ADDON_ID
-from .dependencies import dependency_status
+
+
+def _opencv_status() -> tuple[bool, str]:
+    try:
+        import cv2
+    except Exception as exc:
+        return False, f"OpenCV import failed: {type(exc).__name__}: {exc}"
+    return True, f"OpenCV {cv2.__version__}"
 
 
 class CV_AUTOTRACK_AddonPreferences(bpy.types.AddonPreferences):
@@ -11,10 +18,10 @@ class CV_AUTOTRACK_AddonPreferences(bpy.types.AddonPreferences):
 
     def draw(self, _context):
         layout = self.layout
-        ok, message = dependency_status()
+        ok, message = _opencv_status()
         icon = "CHECKMARK" if ok else "ERROR"
         layout.label(text=message, icon=icon)
-        layout.label(text="Bundled wheels are loaded from the add-on wheels folder when present.")
+        layout.label(text="Python wheels are registered by Blender from the extension manifest.")
 
 
 classes = (CV_AUTOTRACK_AddonPreferences,)

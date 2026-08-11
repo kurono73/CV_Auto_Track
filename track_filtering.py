@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .dependencies import ensure_numpy_cv2
 from .tracking_types import TrackCandidate
 from .utils import mad, median
 
@@ -191,7 +190,9 @@ def _filter_local_motion_coherence(tracks: list[TrackCandidate], settings: Filte
 def ransac_inlier_rate_for_pair(points_a, points_b, settings: FilteringSettings) -> float:
     if not settings.enable_ransac or len(points_a) < settings.ransac_minimum_points:
         return 1.0
-    np, cv2 = ensure_numpy_cv2()
+    import cv2
+    import numpy as np
+
     a = np.asarray(points_a, dtype=np.float32)
     b = np.asarray(points_b, dtype=np.float32)
     mask = None

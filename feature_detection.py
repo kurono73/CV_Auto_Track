@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .dependencies import ensure_numpy_cv2
 from .feature_quality import corner_ratio, is_edge_ambiguous
 
 
@@ -42,7 +41,8 @@ def build_edge_mask(width: int, height: int, edge_margin: int, np):
 def suppress_points(mask, points: list[tuple[float, float]], radius: float) -> None:
     if not points:
         return
-    _, cv2 = ensure_numpy_cv2()
+    import cv2
+
     r = max(1, int(radius))
     for x, y in points:
         cv2.circle(mask, (int(round(x)), int(round(y))), r, 0, thickness=-1)
@@ -54,7 +54,9 @@ def detect_shi_tomasi(
     exclusion_points: list[tuple[float, float]] | None = None,
     external_mask=None,
 ) -> list[tuple[float, float]]:
-    np, cv2 = ensure_numpy_cv2()
+    import cv2
+    import numpy as np
+
     height, width = gray.shape[:2]
     mask = build_edge_mask(width, height, settings.edge_margin, np)
     if external_mask is not None:

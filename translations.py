@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import bpy
 
@@ -15,7 +15,7 @@ _JA_JP = _dictionary(
         ("CV  Auto Track", "CV  Auto Track"),
         ("CV Auto Track Presets", "CV Auto Trackプリセット"),
         ("OpenCV-based feature detection, tracking, cleaning, and solve refinement.", "OpenCVベースの特徴点検出、トラッキング、クリーンアップ、ソルブのリファインを行います。"),
-        ("Bundled wheels are loaded from the add-on wheels folder when present.", "同梱wheelsがある場合は、アドオンのwheelsフォルダーから読み込みます。"),
+        ("Python wheels are registered by Blender from the extension manifest.", "Python wheelsはBlenderが拡張機能マニフェストから登録します。"),
         ("Advanced", "詳細"),
         ("Advanced Mode", "詳細モード"),
         ("Show all CV Auto Track settings", "CV Auto Trackの全設定を表示します"),

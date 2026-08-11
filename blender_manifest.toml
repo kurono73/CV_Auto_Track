@@ -1,11 +1,11 @@
 schema_version = "1.0.0"
 id = "cv_autotrack"
-version = "1.0.1"
+version = "1.0.2"
 name = "CV Auto Track"
 tagline = "Fast OpenCV auto tracking with solve refinement"
 maintainer = "Naoki Korematsu"
 type = "add-on"
-tags = ["Tracking", "Camera"]
+tags = ["Tracking"]
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 platforms = ["windows-x64", "macos-x64", "macos-arm64", "linux-x64"]
