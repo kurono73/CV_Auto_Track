@@ -1,4 +1,7 @@
 # CV Auto Track
+
+[English](README.md) | [日本語](README_ja.md)
+
 ## Overview
 
 CV Auto Track adds fast OpenCV-powered auto tracking to Blender's Movie Clip Editor.
