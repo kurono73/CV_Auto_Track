@@ -1,5 +1,8 @@
 # CV Auto Track
 
+[English](README.md) | [日本語](README_ja.md)
+
+
 ## 概要
 
 CV Auto Track は、Blender の Movie Clip Editor に OpenCV を利用した高速な自動トラッキング機能を追加します。
