@@ -55,7 +55,7 @@ CV Auto Track は、目立つテクスチャがあり、実際のカメラ移動
 
 Solveを行わずトラック生成だけ行いたい場合は、`Generate Tracks` を使用します。
 
-> - `Filter` システムは多くの信頼性の低いトラックを除去しますが、再投影誤差はカメラSolve結果に依存するため、再投影誤差のみではフィルタリングしません。全体のSolve Errorが低くても、2.0 pxを超える個別トラックが残る場合があります。Dope Sheetを確認し、必要に応じて問題のあるトラックを手動で削除するか、Blender標準の `Solve > Clean Up` ツールで高エラートラックを除外してください。
+> - `Generate Tracks` の候補フィルターはカメラSolve前のためBundle Errorを使用しません。`Run Auto Track` および `Solve & Refine` ではSolve後のBundle Errorを使用し、MotionまたはGeometry不整合と重なる候補を優先して除外します。難しいショットではDope Sheetも確認し、必要に応じて問題トラックを手動で調整してください。
 > - `Generate Tracks` を先に実行して、動体へ追従しているトラックやその他の問題トラックを目視で削除してからSolveすることで、品質を高めつつマスク作業を省略できる場合があります。
 > - **CV Auto Track は Blender 標準のトラッキングツールと併用することを前提に設計されています。** 必要に応じて手動トラックを追加し、Blender標準のトラッキングワークフローで難しいショットを補完してください。
 > - **Proxy Fallback:** OpenEXR などOpenCVが直接読み込めないフッテージ形式では、CV Auto Track は Blender の100% Proxyを自動作成して使用するか、既存Proxyを再利用します。既存Proxyを使用する場合は、トラッキング精度低下を避けるため `Quality` を高く設定することを推奨します。
