@@ -209,7 +209,12 @@ def track_points_batch(
     return samples, terminations
 
 
-def track_points_step(gray_a, gray_b, points: list[tuple[float, float]], settings: LKSettings):
+def track_points_step(
+    gray_a,
+    gray_b,
+    points: list[tuple[float, float]],
+    settings: LKSettings,
+):
     """Track many points across one frame pair."""
     import cv2
     import numpy as np
@@ -230,7 +235,7 @@ def track_points_step(gray_a, gray_b, points: list[tuple[float, float]], setting
     }
     next_points, status, err = cv2.calcOpticalFlowPyrLK(gray_a, gray_b, point_array, None, **lk_args)
     if status is None or next_points is None:
-        return [(None, None, None, "lk_status_failed") for _ in points]
+        return [(None, None, None, None, "lk_status_failed") for _ in points]
     if settings.enable_forward_backward:
         back_points, back_status, _ = cv2.calcOpticalFlowPyrLK(gray_b, gray_a, next_points, None, **lk_args)
     else:
@@ -324,6 +329,10 @@ def _patch_correlation(gray_a, gray_b, ax: float, ay: float, bx: float, by: floa
     patch_b = _extract_patch(gray_b, bx, by, size)
     if patch_a is None or patch_b is None:
         return None
+    return patch_similarity(patch_a, patch_b)
+
+
+def patch_similarity(patch_a, patch_b) -> float | None:
     a = patch_a.astype("float32", copy=False)
     b = patch_b.astype("float32", copy=False)
     raw_score = _normalized_correlation(a, b)

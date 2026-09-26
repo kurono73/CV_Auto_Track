@@ -278,10 +278,14 @@ class CV_AUTOTRACK_PG_Settings(bpy.types.PropertyGroup):
     lead_edge_redetect: BoolProperty(name="Lead Edge Redetect", description="Bias adaptive redetection toward the screen edge where new image content is entering", default=True)
     detect_only_when_needed: BoolProperty(name="Detect Only When Needed", description="Skip scheduled detection when current tracks already satisfy the targets", default=True)
 
-    enable_ransac: BoolProperty(name="RANSAC", description="Estimate a rough inlier rate for generated tracks", default=True)
+    enable_ransac: BoolProperty(
+        name="Multi-Baseline RANSAC",
+        description="Reject tracks that repeatedly violate dominant scene geometry across several frame pairs",
+        default=True,
+    )
     ransac_model: EnumProperty(
         name="RANSAC Model",
-        description="Geometric model used for the quick inlier-rate report",
+        description="Geometric model used for multi-baseline outlier filtering",
         items=[("FUNDAMENTAL", "Fundamental Matrix", ""), ("HOMOGRAPHY", "Homography", ""), ("AUTO", "Automatic", "")],
         default="FUNDAMENTAL",
     )

@@ -2,7 +2,6 @@
 
 [English](README.md) | [日本語](README_ja.md)
 
-
 ## 概要
 
 CV Auto Track は、Blender の Movie Clip Editor に OpenCV を利用した高速な自動トラッキング機能を追加します。
@@ -14,7 +13,10 @@ CV Auto Track は、Blender の Movie Clip Editor に OpenCV を利用した高�
 - **高速な OpenCV 自動トラッキング:** 多数の2Dトラッキングマーカーを高速に生成します。
 - **シンプルなプリセット:** Fast、Dynamic、High Motion など、フッテージに合わせたプリセットから開始できます。
 - **ワンクリックでトラックからSolveまで:** 検出、トラッキング、Solve Setup、Solve、Refine を1つのコマンドで実行できます。
-- **自動フィルタリング:** 短いトラック、重複、不安定なトラック、Solve外れ値を除去します。
+- **Auto Scene Setup:** Solve後にシーンカメラ、Camera Solver Constraint、Clip Backgroundを作成または再利用します。
+- **自動フィルタリング:** 短いトラック、重複、不安定、ドリフト、Solve外れ値のトラックを除去します。
+- **オクルージョン/エッジ対策:** 背景トラックが前景シルエットへ乗り移る現象を抑え、線状で曖昧な特徴点を除外します。
+- **Motion整合性フィルター:** Bake前に、ガタつきや周囲の動きと整合しない生成トラックを除外します。
 - **均等な画面カバレッジ:** 一部に集中しすぎないよう、マーカーを画面全体へ分布させます。
 - **マスク対応トラッキング:** マスク領域を避け、禁止領域へ入ったトラックを終了します。
 - **キャッシュを利用した追加トラッキング:** フル解析をやり直さず、キャッシュ済みOpenCV候補から追加の2Dトラックを生成できます。
@@ -43,9 +45,9 @@ CV Auto Track は、目立つテクスチャがあり、実際のカメラ移動
 ## 現在のワークフロー
 
 1. Blender の **Movie Clip Editor** でフッテージを開き、通常どおりクリップ設定を行います。
-2. Toolbar から `CV Auto Track` パネルを開きます。
+2. Toolbar から `CV  Auto Track` タブを開きます。
 3. `Fast`、`Dynamic`、`High Motion` などのトラッキングプリセットを選択します。
-4. *(任意)* `Solve Setup` を開き、キーフレーム、Tripod Motion、Focal Length、Distortion Refine、Full Auto Refine Passes を確認します。
+4. *(任意)* `Solve Setup` を開き、キーフレーム、Tripod Motion、Auto Scene Setup、Focal Length、Distortion Refine、Full Auto Refine Passes を確認します。
 5. *(任意)* `Use Mask` を有効にして、動体やトラッキング禁止領域を除外します。
 6. *(任意)* 生成マーカー数を増減したい場合のみ `Density` を調整します。
 7. **`Run Auto Track`** をクリックします。
@@ -55,10 +57,10 @@ CV Auto Track は、目立つテクスチャがあり、実際のカメラ移動
 
 Solveを行わずトラック生成だけ行いたい場合は、`Generate Tracks` を使用します。
 
-> - `Generate Tracks` の候補フィルターはカメラSolve前のためBundle Errorを使用しません。`Run Auto Track` および `Solve & Refine` ではSolve後のBundle Errorを使用し、MotionまたはGeometry不整合と重なる候補を優先して除外します。難しいショットではDope Sheetも確認し、必要に応じて問題トラックを手動で調整してください。
-> - `Generate Tracks` を先に実行して、動体へ追従しているトラックやその他の問題トラックを目視で削除してからSolveすることで、品質を高めつつマスク作業を省略できる場合があります。
+> - `Generate Tracks` の候補フィルターはカメラSolve前のためBundle Errorを使用しません。`Run Auto Track` および `Solve & Refine` では、Solve後にBundle Errorが高く、MotionまたはGeometry不整合も確認されたトラックを優先して除外します。Bundle Errorが非常に高いトラックは、それ単独でも除外対象になります。
+> - `Generate Tracks` を先に実行し、動体へ追従しているトラックや問題トラックを目視で削除してからSolveすることで、品質を高めつつマスク作業を省略できる場合があります。
 > - **CV Auto Track は Blender 標準のトラッキングツールと併用することを前提に設計されています。** 必要に応じて手動トラックを追加し、Blender標準のトラッキングワークフローで難しいショットを補完してください。
-> - **Proxy Fallback:** OpenEXR などOpenCVが直接読み込めないフッテージ形式では、CV Auto Track は Blender の100% Proxyを自動作成して使用するか、既存Proxyを再利用します。既存Proxyを使用する場合は、トラッキング精度低下を避けるため `Quality` を高く設定することを推奨します。
+> - **Proxy Fallback:** OpenEXR などOpenCVが直接読み込めない形式では、Blenderの100% Proxyを作成して使用するか、既存Proxyを再利用できます。トラッキング精度低下を避けるため、Proxyの `Quality` は高く設定することを推奨します。
 > - **Protected Tracks:** 選択中のトラックは `Solve & Refine` のFilter処理から除外されるため、重要なトラックを保護できます。
 
 ## メインコマンド
@@ -67,14 +69,15 @@ Solveを行わずトラック生成だけ行いたい場合は、`Generate Track
 - **Generate Tracks:** 検出、トラッキング、フィルタリング、分布調整、マーカーBakeのみを実行します。
   - **+ Add Tracks:** 最新のキャッシュ済みOpenCV候補から、控えめな数の追加2Dトラックを生成します。互換性のあるトラッキング処理後のみ有効になります。
 - **Density:** 生成するマーカー量を調整します。低い値では軽量なSolveセット、高い値ではより密なカバレッジになります。
-- **Solve Setup:** Auto Keyframe A/B、Tripod Motion、Camera Focal設定、Distortion Refine、Full Auto Refine Passes、Bake Marker Sizeなど、一般的なカメラSolve設定を1つのダイアログで開きます。
+- **Solve Setup:** Auto Keyframe A/B、Auto Scene Setup、Tripod Motion、Camera Focal設定、Distortion Refine、Full Auto Refine Passes、Bake Marker Sizeなど、一般的なカメラSolve設定を1つのダイアログで開きます。
   - **Auto Keyframe A/B:** 安定したSolve用キーフレームを自動選択し、Blender標準のKeyframe Selectionとの重複動作を避けるためそれを無効化します。
-  - **Auto Scene Setup:** Solve後にアクティブシーンカメラを自動セットアップし、必要に応じてCamera Solver、Clip Background、Undistorted表示を設定します。
-  - **Full Auto Refine Passes:** Run Auto Track が実行するSolve-Refine Pass数を設定します。
+  - **Auto Scene Setup:** Solve後にアクティブシーンカメラを準備し、必要に応じてCamera Solver、Clip Background、Undistorted表示を設定します。
+  - **Full Auto Refine Passes:** `Run Auto Track` が実行するSolve-Refine Pass数を設定します。
   - **Bake Marker Size:** 生成されるBlenderマーカーのPatternおよびSearch Areaサイズを設定します。
 - **Solve:** Add-on UIからBlender標準のカメラSolveを実行します。
-- **Solve & Refine:** Solveを実行し、高エラーまたは動きに不整合のあるトラックを制御されたPassで除去します。
+- **Solve & Refine:** Solveを実行し、非常に高いBundle Error、またはMotion/Geometry不整合を伴う高いBundle Errorのトラックを除去します。
 - **Analyze Solve:** Solve自体は変更せず、Solve外れ値候補を選択またはレポートします。
+- **Delete Auto Tracks:** アクティブなMovie Clipから、CV Auto Trackが作成した `AT_` トラックを削除します。
 
 ForwardおよびAutoトラッキング時は、進捗表示とキャンセル応答性を保つため、検出/トラッキング処理をチャンク単位で実行します。BlenderのSolveおよびRefineはBlender側の処理のため、実行中にUIが一時停止する場合があります。
 
@@ -120,7 +123,9 @@ Track Setupでは、解析対象フレームとOpenCVがフッテージを読み
 - **Analysis Scale:** 一時的なOpenCV解析解像度を設定します。低い値は高速で、高い値はより細かい特徴を検出できます。
 - **Use Mask:** マスク対応の検出とトラッキングを有効にします。動体や禁止領域を避けたい場合に使用します。
 
-Advanced Modeでは、最小解析解像度、フレームキャッシュサイズ、その他の技術設定を追加で利用できます。
+Advanced Modeでは、最小解析解像度、Frame Cache Size、Appearance Check、Edge Ambiguity、Silhouette Proximity、Acceleration、Local Motionの設定を追加で利用できます。
+
+OpenCVが元素材を直接読み込めない場合、CV Auto TrackはBlenderの100% Proxyを使用できます。標準Proxy DirectoryとCustom Proxy Directoryの両方に対応します。
 
 ## Track Modes
 
@@ -146,13 +151,17 @@ Mask Mode:
 
 Mask処理は検出とトラッキングの両方に適用されます。トラックが禁止マスク領域へ入るか、マスク境界を横切ると、そのトラックはフレーム端に到達した場合と同様に終了します。
 
-External Mask Clipはアクティブフッテージ設定と同期できます。Mask DurationがアクティブClipと異なる場合、UIに警告が表示されます。
+External Mask Clipは実行時にアクティブフッテージへ合わせて読み込まれます。Mask DurationがアクティブClipと異なる場合、UIに警告が表示されます。
+
+Mask作成後もMovie Clip EditorがMask Modeの場合、CV Auto TrackはTrackの生成、Solve、Refine、削除を実行する前にTracking Modeへ切り替えます。
 
 ## BakeされたTrackの詳細
 
 CV Auto Track は通常のBlender Movie Tracking Markerを書き込みます。生成されたトラックはMovie Clip Editor標準ツールで選択、非表示、編集、Solve、削除できます。
 
 未トラッキング範囲はDisabled Marker SpanとしてBakeされるため、`Viewport Overlays` > `Show Disabled` で非アクティブ範囲をきれいに非表示にできます。
+
+各MarkerにはPattern AreaとSearch Areaが設定されるため、Bake後もBlenderのMarker Previewを使用できます。
 
 Status Lineには最終的なボタン押下から完了までの時間が表示されます。例: `Completed in 5.61s, 294 tracks`
 
@@ -163,52 +172,35 @@ Advanced Modeでは、難しいフッテージやテスト向けの低レベル�
 - **Track Setup:** Frame Range、Direction、Analysis Scale、Cache Size、Mask設定。
 - **Distribution:** GridとMarker Coverageの挙動。
 - **Detection:** Maximum Features、Quality、Spacing、Block Size、Edge MarginなどのOpenCV Detector設定。
-- **Tracking:** Window Size、Pyramid Levels、Motion Limit、Forward-Backward CheckなどのLucas-Kanade Optical Flow設定。
-- **Filtering:** Length、Duplicate、Validity、RANSAC関連のクリーンアップ閾値。
-- **Refine Settings:** Solve-Refine閾値、Protection Option、Outlier挙動。
+- **Tracking:** Lucas-Kanade Optical Flow、Appearance整合性、Edge/Silhouette対策。
+- **Filtering:** Length、Duplicate、Validity、Acceleration、Local Motion、複数ベースラインRANSACの閾値。
+- **Refine Settings:** Bundle Error、Motion/Geometryの複合判定、Protection Option、Outlier挙動。
 - **Existing Tracks:** ユーザー作成トラックや既存 `AT_` トラックの保護・再利用設定。
 
 `Auto Scale Pixel Parameters` はデフォルトで有効です。ピクセルベースの設定は有効解析解像度に応じて内部的にスケーリングされるため、FHD、4K、異なるAnalysis Scaleでもプリセット挙動をより一貫させます。
 
 `SIFT`、`ORB`、`FAST` などの実験的Detector OptionもAdvanced Modeで利用できます。`Shi-Tomasi` はデフォルトであり、高速なLucas-Kanade Trackingには通常最も適しています。
 
+複数ベースラインRANSACはデフォルトで有効で、複数の有効なフレームペアで繰り返し不整合になったトラックだけを除外します。
+
 ---
 
 # よくある質問
 
 - **カメラSolveが正しくない、または不安定です。**  
-  Solve前にカメラ設定が正しいことを確認してください。  
-  **Auto Keyframe A/B** が不適切なキーフレームを選択している場合は無効化し、別の **Keyframe A** と **Keyframe B** を手動指定して再Solveしてください。
+  Solve前にカメラ設定が正しいことを確認してください。**Auto Keyframe A/B** が不適切なキーフレームを選択している場合は無効化し、別の **Keyframe A** と **Keyframe B** を手動指定して再Solveしてください。
 
 - **Focal Length または Radial Distortion が正しく推定されません。**  
-  CV Auto Track はカメラキャリブレーションにBlender標準のCamera Solverを使用します。  
-  フッテージ、選択された **Keyframe A/B**、初期カメラパラメータによっては、**Focal Length** や **Radial Distortion** が正確に推定されない場合があります。  
-  別のKeyframeを選ぶか、より適切な初期値を指定してください。
+  CV Auto Track はカメラキャリブレーションにBlender標準のCamera Solverを使用します。フッテージ、選択されたKeyframe、初期カメラパラメータによっては正確に推定されない場合があります。別のKeyframeを選ぶか、より適切な初期値を指定してください。
 
 - **良いトラックまで多く削除されてしまいます。**  
-  **Run Auto Track** と **Solve & Refine** は、選択中の **Filter** 設定に基づいて高エラートラックを自動削除します。  
-  生成されたトラックをすべて残したい場合:
-  - **Generate Tracks** の後にBlender標準の **Solve** を使用します。
-  - またはSolve前に **Filter** 設定を調整します。
-  - 選択中のトラックは `Solve & Refine` のFilter処理から除外されます。
+  **Run Auto Track** と **Solve & Refine** は、選択中の **Filter** 設定に基づいてSolve外れ値を自動削除します。すべての生成トラックを残したい場合は、**Generate Tracks** の後に **Solve** を使用するか、Filter設定を調整してください。選択中のトラックはRefine Filterから保護されます。
 
 - **処理が非常に遅いです。**  
-  処理時間は以下の要因によって変わります:
-  - 高いソース解像度
-  - 高い **Density** 値
-  - 長尺フッテージ
-  - **Detailed** プリセットの使用
-
-  参考として、**Full HD・200フレーム** のClipは、ハードウェアにもよりますが **Fast** プリセットで通常 **20秒未満** で完了します。
+  処理時間はソース解像度、Density、フッテージの長さ、`Detailed` プリセットによって増加します。参考として、Full HD・200フレームのClipは、ハードウェアにもよりますが `Fast` プリセットで通常20秒未満で完了します。
 
 - **どのプリセットでもトラックが生成されません。**  
-  フッテージが自動トラッキングに適していない可能性があります。  
-  CV Auto Track は以下のようなフッテージで最も効果を発揮します:
-  - 視認できるテクスチャと特徴の多い表面
-  - 実際のカメラ移動
-  - 良好な画質
-  - 安定したライティング
-  - モーションブラーやデフォーカスが少ないこと
+  フッテージが自動トラッキングに適していない可能性があります。目立つテクスチャ、実際のカメラ移動、良好な画質、安定したライティングがあり、モーションブラーやデフォーカスが少ない素材に適しています。
 
 ## ライセンス
 

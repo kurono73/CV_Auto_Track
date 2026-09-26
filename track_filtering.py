@@ -29,6 +29,22 @@ class FilteringSettings:
     local_motion_minimum_ratio: float = 0.35
 
 
+@dataclass(frozen=True, slots=True)
+class RansacFilterResult:
+    pairs_tested: int = 0
+    tracks_evaluated: int = 0
+    tracks_rejected: int = 0
+    observations: int = 0
+    inliers: int = 0
+    rejected_track_ids: tuple[int, ...] = ()
+
+    @property
+    def inlier_rate(self) -> float:
+        if self.observations <= 0:
+            return 0.0
+        return float(self.inliers) / float(self.observations)
+
+
 def score_track(track: TrackCandidate, settings: FilteringSettings) -> float:
     samples = track.valid_samples
     if not samples:
@@ -45,9 +61,13 @@ def score_track(track: TrackCandidate, settings: FilteringSettings) -> float:
 def motion_smoothness_score(samples) -> float:
     if len(samples) < 4:
         return 0.75
-    velocities = []
-    for a, b in zip(samples, samples[1:]):
-        velocities.append(((b.x - a.x) ** 2 + (b.y - a.y) ** 2) ** 0.5)
+    velocities = [
+        ((b.x - a.x) ** 2 + (b.y - a.y) ** 2) ** 0.5
+        for a, b in zip(samples, samples[1:])
+        if int(b.frame) - int(a.frame) == 1
+    ]
+    if len(velocities) < 2:
+        return 0.75
     center = median(velocities, 0.0)
     spread = mad(velocities, center, 0.0)
     if center <= 0.0001:
@@ -111,14 +131,16 @@ def _filter_acceleration_jitter(tracks: list[TrackCandidate], settings: Filterin
         samples = track.valid_samples
         if len(samples) < 5:
             continue
-        velocities = []
-        for a, b in zip(samples, samples[1:]):
-            frame_delta = max(1, int(b.frame) - int(a.frame))
-            velocities.append(((b.x - a.x) / frame_delta, (b.y - a.y) / frame_delta))
-        accelerations = [
-            ((vx_b - vx_a) ** 2 + (vy_b - vy_a) ** 2) ** 0.5
-            for (vx_a, vy_a), (vx_b, vy_b) in zip(velocities, velocities[1:])
-        ]
+        accelerations = []
+        for run in _contiguous_sample_runs(samples):
+            velocities = [
+                (b.x - a.x, b.y - a.y)
+                for a, b in zip(run, run[1:])
+            ]
+            accelerations.extend(
+                ((vx_b - vx_a) ** 2 + (vy_b - vy_a) ** 2) ** 0.5
+                for (vx_a, vy_a), (vx_b, vy_b) in zip(velocities, velocities[1:])
+            )
         if len(accelerations) < 3:
             continue
         center = median(accelerations, 0.0)
@@ -140,7 +162,7 @@ def _filter_local_motion_coherence(tracks: list[TrackCandidate], settings: Filte
             frame_a = int(a.frame)
             frame_b = int(b.frame)
             frame_delta = frame_b - frame_a
-            if frame_delta <= 0:
+            if frame_delta != 1:
                 continue
             transitions.setdefault((frame_a, frame_b), []).append(
                 (track, float(a.x), float(a.y), (b.x - a.x) / frame_delta, (b.y - a.y) / frame_delta)
@@ -187,19 +209,173 @@ def _filter_local_motion_coherence(tracks: list[TrackCandidate], settings: Filte
                 track.termination_reason = track.termination_reason or "local_motion"
 
 
+def filter_multibaseline_geometry(
+    tracks: list[TrackCandidate],
+    settings: FilteringSettings,
+    maximum_pairs: int = 6,
+    minimum_observations: int = 2,
+    outlier_ratio: float = 0.60,
+) -> RansacFilterResult:
+    if not settings.enable_ransac:
+        return RansacFilterResult()
+
+    usable = [track for track in tracks if not track.disabled and len(track.valid_samples) >= 2]
+    if len(usable) < max(8, int(settings.ransac_minimum_points)):
+        return RansacFilterResult()
+
+    positions = {
+        int(track.id): {
+            int(sample.frame): (float(sample.x), float(sample.y))
+            for sample in track.valid_samples
+        }
+        for track in usable
+    }
+    frames = sorted({frame for samples in positions.values() for frame in samples})
+    frame_pairs = _select_ransac_frame_pairs(positions, frames, settings, maximum_pairs)
+    appearances: dict[int, int] = {}
+    outliers: dict[int, int] = {}
+    pairs_tested = 0
+    observations = 0
+    inliers = 0
+
+    for frame_a, frame_b, common_ids in frame_pairs:
+        points_a = [positions[track_id][frame_a] for track_id in common_ids]
+        points_b = [positions[track_id][frame_b] for track_id in common_ids]
+        mask = _ransac_mask_for_pair(points_a, points_b, settings)
+        if mask is None:
+            continue
+        flat_mask = mask.reshape((-1,))
+        pair_inliers = sum(1 for value in flat_mask if int(value) != 0)
+        if pair_inliers < max(8, len(common_ids) // 2):
+            continue
+        pairs_tested += 1
+        observations += len(common_ids)
+        inliers += pair_inliers
+        for track_id, value in zip(common_ids, flat_mask):
+            appearances[track_id] = appearances.get(track_id, 0) + 1
+            if int(value) == 0:
+                outliers[track_id] = outliers.get(track_id, 0) + 1
+
+    suspects = []
+    minimum_observations = max(2, int(minimum_observations))
+    for track_id, count in appearances.items():
+        rejected = outliers.get(track_id, 0)
+        ratio = rejected / float(max(1, count))
+        if count >= minimum_observations and ratio > float(outlier_ratio):
+            suspects.append((ratio, count, track_id))
+
+    by_id = {int(track.id): track for track in usable}
+    # Geometry can become degenerate on tripod or near-planar shots. Preserve a
+    # healthy solve floor even when several sampled pairs agree on bad labels.
+    reject_limit = max(0, len(usable) - max(8, int(settings.ransac_minimum_points)))
+    rejected_count = 0
+    rejected_ids = []
+    for _ratio, _count, track_id in sorted(suspects, reverse=True)[:reject_limit]:
+        track = by_id.get(track_id)
+        if track is None or track.disabled:
+            continue
+        track.disabled = True
+        track.termination_reason = track.termination_reason or "multibaseline_ransac"
+        rejected_count += 1
+        rejected_ids.append(int(track.id))
+
+    return RansacFilterResult(
+        pairs_tested=pairs_tested,
+        tracks_evaluated=len(appearances),
+        tracks_rejected=rejected_count,
+        observations=observations,
+        inliers=inliers,
+        rejected_track_ids=tuple(rejected_ids),
+    )
+
+
 def ransac_inlier_rate_for_pair(points_a, points_b, settings: FilteringSettings) -> float:
     if not settings.enable_ransac or len(points_a) < settings.ransac_minimum_points:
         return 1.0
+    mask = _ransac_mask_for_pair(points_a, points_b, settings)
+    if mask is None:
+        return 1.0
+    return float(mask.sum()) / float(len(mask))
+
+
+def _ransac_mask_for_pair(points_a, points_b, settings: FilteringSettings):
     import cv2
     import numpy as np
 
+    if len(points_a) != len(points_b):
+        return None
     a = np.asarray(points_a, dtype=np.float32)
     b = np.asarray(points_b, dtype=np.float32)
     mask = None
     if settings.ransac_model in {"FUNDAMENTAL", "AUTO"} and len(points_a) >= 8:
-        _, mask = cv2.findFundamentalMat(a, b, cv2.FM_RANSAC, settings.ransac_threshold, settings.ransac_confidence)
+        _, mask = cv2.findFundamentalMat(
+            a,
+            b,
+            cv2.FM_RANSAC,
+            settings.ransac_threshold,
+            settings.ransac_confidence,
+            200,
+        )
     if mask is None and settings.ransac_model in {"HOMOGRAPHY", "AUTO"} and len(points_a) >= 4:
         _, mask = cv2.findHomography(a, b, cv2.RANSAC, settings.ransac_threshold)
     if mask is None:
-        return 1.0
-    return float(mask.sum()) / float(len(mask))
+        return None
+    return mask
+
+
+def _select_ransac_frame_pairs(positions, frames, settings: FilteringSettings, maximum_pairs: int):
+    if len(frames) < 2:
+        return []
+    minimum_points = max(8 if settings.ransac_model != "HOMOGRAPHY" else 4, int(settings.ransac_minimum_points))
+    span = max(1, int(frames[-1]) - int(frames[0]))
+    minimum_span = max(2, int(round(span * 0.08)))
+    maximum_samples = 16
+    stride = max(1, int(round((len(frames) - 1) / float(maximum_samples - 1))))
+    sampled = frames[::stride]
+    if sampled[-1] != frames[-1]:
+        sampled.append(frames[-1])
+
+    candidates = []
+    for index, frame_a in enumerate(sampled[:-1]):
+        for frame_b in sampled[index + 1 :]:
+            baseline = int(frame_b) - int(frame_a)
+            if baseline < minimum_span:
+                continue
+            common_ids = [
+                track_id
+                for track_id, samples in positions.items()
+                if int(frame_a) in samples and int(frame_b) in samples
+            ]
+            if len(common_ids) < minimum_points:
+                continue
+            target = max(minimum_span, int(round(span * 0.25)))
+            candidates.append((len(common_ids), -abs(baseline - target), baseline, int(frame_a), int(frame_b), common_ids))
+
+    selected = []
+    used_signatures = []
+    for _count, _target_score, baseline, frame_a, frame_b, common_ids in sorted(candidates, reverse=True):
+        midpoint = (frame_a + frame_b) * 0.5
+        if any(
+            abs(midpoint - used_midpoint) < max(1.0, span / 20.0)
+            and abs(baseline - used_baseline) < minimum_span
+            for used_midpoint, used_baseline in used_signatures
+        ):
+            continue
+        selected.append((frame_a, frame_b, common_ids))
+        used_signatures.append((midpoint, baseline))
+        if len(selected) >= max(1, int(maximum_pairs)):
+            break
+    return selected
+
+
+def _contiguous_sample_runs(samples):
+    if not samples:
+        return []
+    ordered = sorted(samples, key=lambda sample: int(sample.frame))
+    runs = [[ordered[0]]]
+    for sample in ordered[1:]:
+        if int(sample.frame) == int(runs[-1][-1].frame) + 1:
+            runs[-1].append(sample)
+        else:
+            runs.append([sample])
+    return runs

@@ -17,9 +17,8 @@ from .frame_provider import FrameProvider, range_from_props
 from .masks import build_detection_mask, clear_detection_mask_cache
 from .optical_flow import LKSettings, track_points_batch, track_points_step
 from .track_distribution import DistributionSettings, cell_for_point, enforce_distribution, limit_enabled_tracks
-from .track_filtering import FilteringSettings, filter_tracks, ransac_inlier_rate_for_pair
+from .track_filtering import FilteringSettings, filter_multibaseline_geometry, filter_tracks
 from .tracking_types import TrackCandidate, TrackingStats, TrackSample
-
 
 class DetectTrackSession:
     def __init__(self, context, clip, props):
@@ -172,7 +171,12 @@ class _StreamPassSession:
         height, width = gray.shape[:2]
         if self.previous_gray is not None and self.active:
             points = [(x, y) for _, x, y in self.active]
-            step_results = track_points_step(self.previous_gray, gray, points, self.lk_settings)
+            step_results = track_points_step(
+                self.previous_gray,
+                gray,
+                points,
+                self.lk_settings,
+            )
             next_active = []
             motion_steps = []
             mask_cache = {}
@@ -329,6 +333,10 @@ def run_detect_track(context, clip, props, cancel_cb=None, progress_cb=None) -> 
 def _finalize_detect_track(context, clip, props, provider, frames: list[int], candidates: list[TrackCandidate], stats: TrackingStats) -> None:
     filtering_settings = _filtering_settings(props, provider)
     filter_tracks(candidates, filtering_settings)
+    ransac_result = filter_multibaseline_geometry(candidates, filtering_settings)
+    stats.ransac_inlier_rate = ransac_result.inlier_rate
+    stats.ransac_pairs = ransac_result.pairs_tested
+    stats.ransac_rejected_tracks = ransac_result.tracks_rejected
     if provider.analysis_width and provider.analysis_height:
         distribution_settings = _distribution_settings(props)
         enforce_distribution(
@@ -353,7 +361,6 @@ def _finalize_detect_track(context, clip, props, provider, frames: list[int], ca
     stats.valid_tracks = sum(1 for item in candidates if not item.disabled)
     stats.disabled_tracks = sum(1 for item in candidates if item.disabled)
     _fill_length_stats(stats, candidates)
-    stats.ransac_inlier_rate = _quick_ransac_rate(candidates, filtering_settings)
     if _replaces_autotrack(props):
         _delete_autotrack_tracks(context, clip)
     created, disabled = bake_candidates(
@@ -585,7 +592,12 @@ def _run_stream_pass(
         height, width = gray.shape[:2]
         if previous_gray is not None and active:
             points = [(x, y) for _, x, y in active]
-            step_results = track_points_step(previous_gray, gray, points, lk_settings)
+            step_results = track_points_step(
+                previous_gray,
+                gray,
+                points,
+                lk_settings,
+            )
             next_active = []
             motion_steps = []
             mask_cache = {}
@@ -1453,14 +1465,3 @@ def _sort_candidates_for_bake(candidates: list[TrackCandidate]) -> None:
             int(candidate.id),
         )
     )
-
-
-def _quick_ransac_rate(candidates: list[TrackCandidate], settings: FilteringSettings) -> float:
-    pairs_a = []
-    pairs_b = []
-    for candidate in candidates:
-        samples = candidate.valid_samples
-        if len(samples) >= 2:
-            pairs_a.append((samples[0].x, samples[0].y))
-            pairs_b.append((samples[-1].x, samples[-1].y))
-    return ransac_inlier_rate_for_pair(pairs_a, pairs_b, settings)

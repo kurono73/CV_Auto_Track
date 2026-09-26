@@ -325,7 +325,7 @@ class CV_AUTOTRACK_PT_filtering(bpy.types.Panel):
             layout.prop(props, "motion_outlier_min_ratio", text="Motion Ratio")
             layout.prop(props, "motion_outlier_local_radius", text="Local Radius")
             layout.prop(props, "motion_outlier_local_min_tracks", text="Local Min")
-        layout.prop(props, "enable_ransac")
+        layout.prop(props, "enable_ransac", text="Multi-Baseline RANSAC")
         if props.enable_ransac:
             layout.prop(props, "ransac_model", text="Model")
             layout.prop(props, "ransac_threshold", text="Threshold")

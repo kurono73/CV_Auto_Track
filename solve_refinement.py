@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from .blender_tracks import disable_tracks, is_autotrack_track, target_tracks
 from .compatibility import marker_co_to_pixel
 from .constants import PROTECTED_PREFIX
+from .constants import REFERENCE_ANALYSIS_WIDTH
+from .track_filtering import FilteringSettings, filter_multibaseline_geometry
+from .tracking_types import TrackCandidate, TrackSample
 from .utils import mad
 
 
@@ -107,14 +110,42 @@ def collect_error_tracks(clip, props):
 
 
 def choose_outliers(clip, props):
-    candidates = _solve_error_outliers(clip, props)
+    outliers, _forced_filter_names = _choose_outliers_with_forced_names(clip, props)
+    return outliers
+
+
+def _choose_outliers_with_forced_names(clip, props):
+    error_tracks = collect_error_tracks(clip, props)
+    if not error_tracks:
+        return [], set()
+    hard_threshold, soft_threshold = _solve_error_thresholds(error_tracks, props)
     motion_candidates = _motion_outliers(clip, props)
-    by_name = {track.name: (track, score) for track, score in candidates}
-    for track, score in motion_candidates:
-        current = by_name.get(track.name)
-        if current is None or score > current[1]:
-            by_name[track.name] = (track, score)
-    candidates = list(by_name.values())
+    geometry_candidates = _geometry_outliers(clip, props)
+    motion_names = {track.name for track, _score in motion_candidates}
+    geometry_names = {track.name for track, _score in geometry_candidates}
+    forced_filter_names = set()
+    candidates = []
+    for track, error in error_tracks:
+        motion = track.name in motion_names
+        geometry = track.name in geometry_names
+        soft_error = float(error) > soft_threshold
+        hard_error = float(error) > hard_threshold
+        # Motion alone is ambiguous in scenes with parallax. Prioritize tracks
+        # where independent solve and motion/geometry evidence agree.
+        if soft_error and motion and geometry:
+            priority = 5.0e6
+            forced_filter_names.add(track.name)
+        elif soft_error and motion:
+            priority = 4.0e6
+            forced_filter_names.add(track.name)
+        elif soft_error and geometry:
+            priority = 3.0e6
+            forced_filter_names.add(track.name)
+        elif hard_error:
+            priority = 2.0e6
+        else:
+            continue
+        candidates.append((track, priority + float(error)))
     candidates.sort(key=lambda item: item[1], reverse=True)
 
     enabled_count = _enabled_track_count(clip)
@@ -122,23 +153,36 @@ def choose_outliers(clip, props):
     per_iteration = max(1, int(props.maximum_disabled_per_iteration))
     percentage_limit = max(1, int(enabled_count * (float(props.outlier_percentage_per_iteration) / 100.0)))
     limit = min(remaining_budget, per_iteration, percentage_limit)
-    return [track for track, _ in candidates[:limit]]
+    return [track for track, _ in candidates[:limit]], forced_filter_names
 
 
 def _solve_error_outliers(clip, props):
     error_tracks = collect_error_tracks(clip, props)
     if not error_tracks:
         return []
-    errors = [error for _, error in error_tracks]
-    center = statistics.median(errors)
-    spread = mad(errors, center, 0.0)
-    relative_threshold = center + (float(props.mad_multiplier) * spread)
-    absolute_threshold = float(props.maximum_track_error)
+    hard_threshold, _soft_threshold = _solve_error_thresholds(error_tracks, props)
     return [
         (track, error)
         for track, error in error_tracks
-        if error > absolute_threshold or error > relative_threshold
+        if error > hard_threshold
     ]
+
+
+def _solve_error_thresholds(error_tracks, props) -> tuple[float, float]:
+    errors = [float(error) for _track, error in error_tracks]
+    center = statistics.median(errors)
+    spread = mad(errors, center, 0.0)
+    absolute_threshold = max(0.001, float(props.maximum_track_error))
+    multiplier = max(0.0, float(props.mad_multiplier))
+    # A zero MAD is common when Blender reports many similar bundle errors.
+    # Keep a small absolute margin so any tiny deviation is not treated as an
+    # outlier merely because the robust spread collapsed to zero.
+    minimum_margin = max(0.1, absolute_threshold * 0.125)
+    relative_threshold = center + max(minimum_margin, multiplier * spread)
+    hard_threshold = min(absolute_threshold, relative_threshold)
+    soft_relative = center + max(minimum_margin * 0.5, multiplier * spread * 0.5)
+    soft_threshold = min(absolute_threshold * 0.75, soft_relative)
+    return hard_threshold, soft_threshold
 
 
 def _motion_outliers(clip, props):
@@ -160,8 +204,11 @@ def _motion_outliers(clip, props):
     tracks_by_name = {}
     minimum_tracks = max(8, int(getattr(props, "minimum_remaining_tracks", 20) * 0.25))
     multiplier = float(getattr(props, "motion_outlier_multiplier", 4.0))
-    minimum_residual = float(getattr(props, "motion_outlier_min_residual", 20.0))
-    local_radius = float(getattr(props, "motion_outlier_local_radius", 180.0))
+    pixel_scale = 1.0
+    if bool(getattr(props, "auto_scale_pixel_parameters", True)):
+        pixel_scale = max(0.05, float(width) / float(REFERENCE_ANALYSIS_WIDTH))
+    minimum_residual = float(getattr(props, "motion_outlier_min_residual", 20.0)) * pixel_scale
+    local_radius = float(getattr(props, "motion_outlier_local_radius", 180.0)) * pixel_scale
     local_minimum = max(3, int(getattr(props, "motion_outlier_local_min_tracks", 6)))
     for items in transitions.values():
         if len(items) < minimum_tracks:
@@ -177,7 +224,12 @@ def _motion_outliers(clip, props):
             tracks_by_name[track.name] = track
             total_counts[track.name] = total_counts.get(track.name, 0) + 1
             effective_residual = max(residual, local_residual)
-            if residual <= threshold and local_residual <= local_threshold:
+            local_available = local_threshold < float("inf")
+            if local_available:
+                motion_outlier = residual > threshold and local_residual > local_threshold
+            else:
+                motion_outlier = residual > threshold
+            if not motion_outlier:
                 continue
             bad_counts[track.name] = bad_counts.get(track.name, 0) + 1
             scores[track.name] = max(scores.get(track.name, 0.0), effective_residual)
@@ -223,7 +275,7 @@ def _track_motion_steps(track, width: int, height: int):
         frame_a = int(marker_a.frame)
         frame_b = int(marker_b.frame)
         frame_delta = frame_b - frame_a
-        if frame_delta <= 0:
+        if frame_delta != 1:
             continue
         ax, ay = marker_co_to_pixel(tuple(marker_a.co), width, height)
         bx, by = marker_co_to_pixel(tuple(marker_b.co), width, height)
@@ -271,14 +323,13 @@ def refine_solve(context, clip, props, cancel_cb=None, progress_cb=None, max_ite
             best_error = current_error
             best_state = _snapshot_mutes(clip)
             best_state_is_current = True
-        outliers = choose_outliers(clip, props)
+        outliers, forced_filter_names = _choose_outliers_with_forced_names(clip, props)
         if not outliers:
             if 0 <= current_error <= float(props.target_solve_error):
                 result.message = "Target solve error reached."
                 break
             result.message = "No solve outliers to disable."
             break
-        forced_motion_names = {track.name for track, _score in _motion_outliers(clip, props)}
         state_before_disable = _snapshot_mutes(clip)
         outlier_names = [track.name for track in outliers]
         disabled = disable_tracks(outliers)
@@ -302,7 +353,7 @@ def refine_solve(context, clip, props, cancel_cb=None, progress_cb=None, max_ite
                     result.message = "Solve error worsened; kept rejected tracks for deletion."
                     break
                 _restore_mutes(clip, state_before_disable)
-                forced_outliers = [track for track in outliers if track.name in forced_motion_names]
+                forced_outliers = [track for track in outliers if track.name in forced_filter_names]
                 forced_disabled = disable_tracks(forced_outliers)
                 if forced_disabled:
                     solve_camera(context, clip)
@@ -312,7 +363,7 @@ def refine_solve(context, clip, props, cancel_cb=None, progress_cb=None, max_ite
                     result.disabled_tracks -= disabled - forced_disabled
                     keep_names = {track.name for track in forced_outliers}
                     result.disabled_track_names = [name for name in result.disabled_track_names if name in keep_names]
-                    result.message = "Solve error worsened; kept motion-filtered outliers."
+                    result.message = "Solve error worsened; kept filter-selected outliers."
                     break
                 solve_camera(context, clip)
                 best_state_is_current = False
@@ -343,6 +394,47 @@ def refine_solve(context, clip, props, cancel_cb=None, progress_cb=None, max_ite
 
 def analyze_solve(clip, props):
     return collect_error_tracks(clip, props)
+
+
+def _geometry_outliers(clip, props):
+    if not bool(getattr(props, "enable_ransac", True)):
+        return []
+    width, height = _clip_dimensions(clip)
+    if width <= 0 or height <= 0:
+        return []
+    candidates = []
+    tracks_by_id = {}
+    for track_id, track in enumerate(target_tracks(clip), start=1):
+        if not _can_refine_track(track, props):
+            continue
+        samples = []
+        for marker in track.markers:
+            if marker.mute:
+                continue
+            x, y = marker_co_to_pixel(tuple(marker.co), width, height)
+            samples.append(TrackSample(int(marker.frame), float(x), float(y)))
+        if len(samples) < 2:
+            continue
+        candidates.append(TrackCandidate(track_id, int(samples[0].frame), samples=samples))
+        tracks_by_id[track_id] = track
+    if not candidates:
+        return []
+    scale = 1.0
+    if bool(getattr(props, "auto_scale_pixel_parameters", True)):
+        scale = max(0.05, float(width) / float(REFERENCE_ANALYSIS_WIDTH))
+    settings = FilteringSettings(
+        enable_ransac=True,
+        ransac_model=str(getattr(props, "ransac_model", "FUNDAMENTAL")),
+        ransac_threshold=float(getattr(props, "ransac_threshold", 2.0)) * scale,
+        ransac_confidence=float(getattr(props, "ransac_confidence", 0.99)),
+        ransac_minimum_points=int(getattr(props, "ransac_minimum_points", 12)),
+    )
+    result = filter_multibaseline_geometry(candidates, settings)
+    return [
+        (tracks_by_id[track_id], 1.0e6)
+        for track_id in result.rejected_track_ids
+        if track_id in tracks_by_id
+    ]
 
 
 def _track_error(track) -> float | None:

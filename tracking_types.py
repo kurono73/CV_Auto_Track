@@ -42,6 +42,8 @@ class TrackingStats:
     median_track_length: float = 0.0
     average_fb_error: float = 0.0
     ransac_inlier_rate: float = 0.0
+    ransac_pairs: int = 0
+    ransac_rejected_tracks: int = 0
     solve_error_before: float = -1.0
     solve_error_after: float = -1.0
     refine_iterations: int = 0
@@ -66,6 +68,10 @@ class TrackingStats:
             lines.append(f"Average FB Error: {self.average_fb_error:.3f}")
         if self.ransac_inlier_rate > 0.0 and self.generated_tracks > 0:
             lines.append(f"RANSAC Inlier Rate: {self.ransac_inlier_rate:.3f}")
+        if self.ransac_pairs > 0:
+            lines.append(f"RANSAC Frame Pairs: {self.ransac_pairs}")
+        if self.ransac_rejected_tracks > 0:
+            lines.append(f"RANSAC Rejected Tracks: {self.ransac_rejected_tracks}")
         if self.solve_error_before >= 0.0:
             lines.append(f"Solve Error Before: {self.solve_error_before:.3f}")
         if self.solve_error_after >= 0.0:
