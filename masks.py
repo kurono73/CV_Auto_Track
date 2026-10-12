@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 from pathlib import Path
 
 from .compatibility import clip_frame_to_scene_frame, resolve_blender_path
@@ -50,6 +51,8 @@ def build_detection_mask(context, clip, props, width: int, height: int, np, fram
         return cached
     if getattr(props, "mask_source", "BLENDER") == "EXTERNAL":
         result = _build_external_mask(context, clip, props, width, height, np, cv2, frame)
+    elif _has_tracking_parent(mask_data):
+        result = _rasterize_parented_mask(context, mask_data, clip, width, height, np, cv2, frame)
     else:
         original_frame = _set_scene_frame_for_mask(context, clip, frame)
         try:
@@ -87,6 +90,105 @@ def build_detection_mask(context, clip, props, width: int, height: int, np, fram
 
 def clear_detection_mask_cache() -> None:
     _MASK_CACHE.clear()
+
+
+def _has_tracking_parent(mask_data) -> bool:
+    return any(
+        point.parent.id is not None
+        for layer in mask_data.layers
+        if not layer.hide and not layer.hide_render
+        for spline in layer.splines
+        if spline.use_fill
+        for point in spline.points
+    )
+
+
+def _rasterize_parented_mask(context, mask_data, clip, width, height, np, cv2, frame):
+    import bpy
+
+    # RNA exposes undeformed spline coordinates even on evaluated Mask IDs.
+    # A mask-only compositor graph reads Blender's tracking-parent deformation.
+    scene = bpy.data.scenes.new("CVAutoTrackMaskEvaluation")
+    camera_data = camera = tree = mask_copy = image = None
+    owns_tree = False
+    render_result = bpy.data.images.get("Render Result")
+    original_slot = None
+    try:
+        if render_result is not None:
+            slots = render_result.render_slots
+            original_slot = slots.active_index
+            slot_index = next((i for i, slot in enumerate(slots) if slot.name == "CV Auto Track Mask"), None)
+            if slot_index is None:
+                slots.new(name="CV Auto Track Mask")
+                slot_index = len(slots) - 1
+            slots.active_index = slot_index
+        scene.render.engine = "BLENDER_WORKBENCH"
+        scene.render.resolution_x = int(width)
+        scene.render.resolution_y = int(height)
+        scene.render.resolution_percentage = 100
+        scene.render.use_compositing = True
+        if hasattr(scene.render, "compositor_device"):
+            scene.render.compositor_device = "CPU"
+        scene.view_settings.view_transform = "Raw"
+        scene.render.image_settings.file_format = "PNG"
+        scene.render.image_settings.color_mode = "BW"
+        scene.render.image_settings.color_depth = "8"
+        camera_data = bpy.data.cameras.new("CVAutoTrackMaskCamera")
+        camera = bpy.data.objects.new("CVAutoTrackMaskCamera", camera_data)
+        scene.collection.objects.link(camera)
+        scene.camera = camera
+        if hasattr(scene, "compositing_node_group"):
+            tree = bpy.data.node_groups.new("CVAutoTrackMaskCompositor", "CompositorNodeTree")
+            owns_tree = True
+            scene.compositing_node_group = tree
+            tree.interface.new_socket(name="Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+            output = tree.nodes.new("NodeGroupOutput")
+        else:
+            scene.use_nodes = True
+            tree = scene.node_tree
+            tree.nodes.clear()
+            output = tree.nodes.new("CompositorNodeComposite")
+        mask_copy = mask_data.copy()
+        for layer in mask_copy.layers:
+            if layer.hide:
+                layer.hide_render = True
+        node = tree.nodes.new("CompositorNodeMask")
+        node.mask = mask_copy
+        if "Feather" in node.inputs:
+            node.inputs["Feather"].default_value = False
+        else:
+            node.use_feather = False
+        tree.links.new(node.outputs[0], output.inputs[0])
+        scene_frame = (
+            clip_frame_to_scene_frame(int(frame), int(getattr(clip, "frame_start", 1)))
+            if frame is not None else int(context.scene.frame_current)
+        )
+        scene.frame_set(scene_frame)
+        with tempfile.TemporaryDirectory(prefix="cv_autotrack_mask_") as directory:
+            scene.render.filepath = str(Path(directory) / "mask.png")
+            with bpy.context.temp_override(scene=scene):
+                bpy.ops.render.render(scene=scene.name, write_still=True)
+            image = bpy.data.images.load(scene.render.filepath, check_existing=False)
+            image.colorspace_settings.name = "Non-Color"
+            pixels = np.empty(int(width) * int(height) * 4, dtype=np.float32)
+            image.pixels.foreach_get(pixels)
+            values = np.flipud(pixels.reshape((int(height), int(width), 4))[:, :, 0])
+            result = np.clip(values * 255.0, 0.0, 255.0).astype(np.uint8)
+            return cv2.threshold(result, 127, 255, cv2.THRESH_BINARY)[1]
+    finally:
+        if original_slot is not None:
+            render_result.render_slots.active_index = original_slot
+        if image is not None:
+            bpy.data.images.remove(image)
+        bpy.data.scenes.remove(scene)
+        if owns_tree and tree is not None and tree.users == 0:
+            bpy.data.node_groups.remove(tree)
+        if camera is not None:
+            bpy.data.objects.remove(camera, do_unlink=True)
+        if camera_data is not None:
+            bpy.data.cameras.remove(camera_data)
+        if mask_copy is not None:
+            bpy.data.masks.remove(mask_copy)
 
 
 def _cache_key(context, mask_data, clip, props, width: int, height: int, frame: int | None) -> tuple:
