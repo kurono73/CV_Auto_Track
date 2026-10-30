@@ -20,6 +20,7 @@ USER_DEFAULT_PROPERTY_NAMES = (
     "custom_start_frame",
     "custom_end_frame",
     "tracking_direction",
+    "extend_new_tracks",
     "analysis_scale",
     "detector_type",
     "auto_scale_pixel_parameters",
@@ -198,6 +199,11 @@ class CV_AUTOTRACK_PG_Settings(bpy.types.PropertyGroup):
             ("AUTO", "Auto", "Run separate forward and backward passes"),
         ],
         default="AUTO",
+    )
+    extend_new_tracks: BoolProperty(
+        name="Two-Way Tracking",
+        description="Track newly added points in both directions, extending their span by up to 12 frames; adds processing time",
+        default=False,
     )
     analysis_scale: EnumProperty(
         name="Analysis Scale",

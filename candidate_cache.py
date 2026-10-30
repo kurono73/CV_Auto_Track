@@ -36,6 +36,7 @@ _KEY_PROPERTY_NAMES = (
     "custom_start_frame",
     "custom_end_frame",
     "tracking_direction",
+    "extend_new_tracks",
     "analysis_scale",
     "detector_type",
     "auto_scale_pixel_parameters",

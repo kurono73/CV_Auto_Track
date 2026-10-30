@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import traceback
 import time
+import json
+from dataclasses import asdict
 
 import bl_operators
 import bpy
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, StringProperty
 
 from . import blender_tracks
-from .frame_provider import OpenCVUnsupportedMediaError
+from .frame_provider import OpenCVUnsupportedMediaError, range_from_props
 from .properties import USER_DEFAULT_PROPERTY_NAMES
 from .scene_setup import ensure_scene_setup
+from .solve_coverage import inspect_solve_coverage
 from .solve_refinement import analyze_solve, choose_outliers, refine_solve, solve_camera
 from .solve_keyframes import (
     apply_keyframes,
@@ -58,6 +61,8 @@ def _status_from_stats(stats: TrackingStats) -> str:
     if state.startswith("Cancelled"):
         return f"Cancelled after {elapsed:.2f}s"
     if state.startswith("Error"):
+        return state
+    if state == "Tracks ready; solve not started.":
         return state
     if state != "Completed" and int(getattr(stats, "generated_tracks", 0)) <= 0 and int(getattr(stats, "valid_tracks", 0)) <= 0:
         return state
@@ -518,14 +523,102 @@ class CV_AUTOTRACK_OT_analyze_solve(bpy.types.Operator):
         return _run_safely(self, context, work)
 
 
+def _solve_coverage_needs_attention(context, clip, props):
+    frame_range = range_from_props(context, clip, props)
+    duration = max(1, int(clip.frame_duration))
+    return inspect_solve_coverage(
+        clip, max(1, int(frame_range.start)), min(duration, int(frame_range.end)),
+    ).needs_confirmation
+
+
+def _request_solve_confirmation(operator, context, clip, props, action, resume_state=""):
+    if operator.skip_coverage_check or not _solve_coverage_needs_attention(context, clip, props):
+        return False
+    if bpy.app.background or context.window is None:
+        operator.report({"WARNING"}, "Some frames may not have enough connected tracks for solving.")
+        return False
+    active_object = clip.tracking.objects.active
+    props.status_message = "Tracks ready; solve not started."
+    bpy.ops.clip.cv_autotrack_confirm_solve(
+        "INVOKE_DEFAULT", action=action, clip_name=clip.name,
+        tracking_object_name=active_object.name if active_object is not None else "",
+        resume_state=resume_state,
+    )
+    return True
+
+
+def _report_remaining_coverage(operator, context, clip, props, stats):
+    if _solve_coverage_needs_attention(context, clip, props):
+        stats.warning_count += 1
+        operator.report({"WARNING"}, "Some frames may need manual track adjustment.")
+
+
+class CV_AUTOTRACK_OT_confirm_solve(bpy.types.Operator):
+    bl_idname = "clip.cv_autotrack_confirm_solve"
+    bl_label = "Track Coverage Warning"
+    bl_description = "Choose whether to solve tracks with incomplete frame coverage or continuity"
+    bl_options = {"INTERNAL"}
+
+    action: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    clip_name: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    tracking_object_name: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    resume_state: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    continue_solve: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_popup(self, width=360)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.label(text="Some frames may have too few usable tracks.", icon="ERROR")
+        layout.label(text="Track continuity may also be insufficient.")
+        layout.separator()
+        layout.operator_context = "EXEC_DEFAULT"
+        for proceed, label, icon in (
+            (True, "Continue Solve", "TRACKER"), (False, "Keep Tracks", "CHECKMARK"),
+        ):
+            button = layout.operator(self.bl_idname, text=label, icon=icon)
+            button.action = self.action
+            button.clip_name = self.clip_name
+            button.tracking_object_name = self.tracking_object_name
+            button.resume_state = self.resume_state
+            button.continue_solve = proceed
+
+    def execute(self, context):
+        if not self.continue_solve:
+            context.scene.cv_autotrack.status_message = "Tracks ready; solve not started."
+            return {"FINISHED"}
+        clip = active_clip(context)
+        active_object = clip.tracking.objects.active if clip is not None else None
+        if (
+            clip is None or clip.name != self.clip_name or active_object is None
+            or active_object.name != self.tracking_object_name
+        ):
+            self.report({"ERROR"}, "The active clip or tracking object changed. Run Solve again.")
+            return {"CANCELLED"}
+        if self.action == "FULL_AUTO":
+            return bpy.ops.clip.cv_autotrack_full_auto_track(
+                "EXEC_DEFAULT", resume_state=self.resume_state, skip_coverage_check=True,
+            )
+        if self.action == "SOLVE":
+            return bpy.ops.clip.cv_autotrack_solve_camera("EXEC_DEFAULT", skip_coverage_check=True)
+        if self.action == "REFINE":
+            return bpy.ops.clip.cv_autotrack_solve_refine("EXEC_DEFAULT", skip_coverage_check=True)
+        return {"CANCELLED"}
+
+
 class CV_AUTOTRACK_OT_solve_camera(bpy.types.Operator):
     bl_idname = "clip.cv_autotrack_solve_camera"
     bl_label = "Solve"
     bl_description = "Run Blender's standard camera solve using the active Movie Clip"
     bl_options = {"REGISTER", "UNDO"}
 
+    skip_coverage_check: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
     def execute(self, context):
         def work(clip, props):
+            if _request_solve_confirmation(self, context, clip, props, "SOLVE"):
+                return {"FINISHED"}
             started = time.perf_counter()
             _apply_solve_keyframes_from_clip(clip, props)
             ok, message = solve_camera(context, clip, reset_radial=True)
@@ -538,6 +631,7 @@ class CV_AUTOTRACK_OT_solve_camera(bpy.types.Operator):
                 processing_time=time.perf_counter() - started,
                 cancellation_state=message,
             )
+            _report_remaining_coverage(self, context, clip, props, stats)
             _store_stats(props, stats)
             self.report({"INFO"}, message)
             return {"FINISHED"}
@@ -551,8 +645,12 @@ class CV_AUTOTRACK_OT_solve_refine(bpy.types.Operator):
     bl_description = "Run Blender camera solve and progressively disable high-error tracks"
     bl_options = {"REGISTER", "UNDO"}
 
+    skip_coverage_check: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
     def execute(self, context):
         def work(clip, props):
+            if _request_solve_confirmation(self, context, clip, props, "REFINE"):
+                return {"FINISHED"}
             started = time.perf_counter()
             _apply_solve_keyframes_from_clip(clip, props)
             result = refine_solve(context, clip, props, cancel_cb=lambda: bool(props.cancel_requested))
@@ -571,6 +669,7 @@ class CV_AUTOTRACK_OT_solve_refine(bpy.types.Operator):
                 processing_time=time.perf_counter() - started,
                 cancellation_state=result.message,
             )
+            _report_remaining_coverage(self, context, clip, props, stats)
             _store_stats(props, stats)
             self.report({"INFO"}, result.message)
             return {"FINISHED"}
@@ -740,6 +839,10 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
     _session = None
     _started = 0.0
     _last_ui_update = 0.0
+    _solve_deferred = False
+
+    skip_coverage_check: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+    resume_state: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
 
     def invoke(self, context, _event):
         props = context.scene.cv_autotrack
@@ -817,7 +920,8 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
                         solve_progress=solve_progress,
                     )
                     _store_stats(props, stats)
-                    self.report({"INFO"}, "Full Auto Track finished.")
+                    if not self._solve_deferred:
+                        self.report({"INFO"}, "Full Auto Track finished.")
                     return self._finish_modal(context, cancelled=False, close_session=False, keep_status=True)
         except OpenCVUnsupportedMediaError as exc:
             traceback.print_exc()
@@ -864,7 +968,15 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
         started: float,
         solve_progress,
     ) -> TrackingStats:
+        self._solve_deferred = False
         if props.auto_solve_refine and not props.cancel_requested:
+            stats.processing_time = time.perf_counter() - started
+            resume_state = json.dumps({"stats": asdict(stats), "started": started})
+            if _request_solve_confirmation(self, context, clip, props, "FULL_AUTO", resume_state):
+                stats.cancellation_state = "Tracks ready; solve not started."
+                stats.warning_count += 1
+                self._solve_deferred = True
+                return stats
             _flush_clip_tracking(context, clip)
             if bool(props.auto_solve_keyframes):
                 props.status_message = "Choosing keyframes"
@@ -897,6 +1009,7 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
             stats.deleted_tracks += deleted
             stats.valid_tracks = _enabled_track_count(clip)
             stats.cancellation_state = refine.message
+            _report_remaining_coverage(self, context, clip, props, stats)
         stats.processing_time = time.perf_counter() - started
         return stats
 
@@ -915,8 +1028,15 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
                 wm.progress_update(75.0 + ((index / max(1, total)) * 25.0))
 
             try:
-                use_existing_autotrack = _full_auto_reuses_existing_autotrack(props) and _autotrack_track_count(clip) > 0
-                if use_existing_autotrack:
+                use_existing_autotrack = bool(self.resume_state) or (
+                    _full_auto_reuses_existing_autotrack(props) and _autotrack_track_count(clip) > 0
+                )
+                if self.resume_state:
+                    state = json.loads(self.resume_state)
+                    started = float(state["started"])
+                    stats = TrackingStats(**state["stats"])
+                    candidates = []
+                elif use_existing_autotrack:
                     props.status_message = "Using existing CV Auto Track tracks"
                     wm.progress_update(75.0)
                     candidates = []
@@ -949,7 +1069,8 @@ class CV_AUTOTRACK_OT_full_auto_track(bpy.types.Operator):
             if not props.auto_solve_refine or props.cancel_requested:
                 stats.processing_time = time.perf_counter() - started
             _store_stats(props, stats)
-            self.report({"INFO"}, "Full Auto Track finished.")
+            if not self._solve_deferred:
+                self.report({"INFO"}, "Full Auto Track finished.")
             return {"FINISHED"}
 
         return _run_safely(self, context, work)
@@ -1101,6 +1222,7 @@ classes = (
     CV_AUTOTRACK_OT_detect_track,
     CV_AUTOTRACK_OT_clean_tracks,
     CV_AUTOTRACK_OT_analyze_solve,
+    CV_AUTOTRACK_OT_confirm_solve,
     CV_AUTOTRACK_OT_solve_camera,
     CV_AUTOTRACK_OT_solve_refine,
     CV_AUTOTRACK_OT_solve_setup_dialog,

@@ -20,6 +20,8 @@ from .track_distribution import DistributionSettings, cell_for_point, enforce_di
 from .track_filtering import FilteringSettings, filter_multibaseline_geometry, filter_tracks
 from .tracking_types import TrackCandidate, TrackingStats, TrackSample
 
+_NEW_TRACK_EXTENSION_FRAMES = 12
+
 class DetectTrackSession:
     def __init__(self, context, clip, props):
         self.context = context
@@ -86,8 +88,8 @@ class DetectTrackSession:
                         self.provider,
                         list(reversed(self.frames)),
                         existing_candidates=forward_candidates,
-                        first_id=len(forward_candidates) + 1,
-                        source_batch_offset=len(forward_candidates),
+                        first_id=_next_candidate_id(forward_candidates),
+                        source_batch_offset=max((item.source_batch_id for item in forward_candidates), default=0),
                         progress_label="Backward",
                     )
                 )
@@ -217,13 +219,15 @@ class _StreamPassSession:
         combined_points = active_points + existing_candidate_points
         underfilled_cells = _underfilled_cells_for_points(combined_points, width, height, self.props)
         underfilled_cells = _add_lead_edge_cells(underfilled_cells, self.last_motion_vector, width, height, self.props)
-        should_detect = self._should_detect(frame, bool(underfilled_cells))
-        if (
-            self.props.detect_only_when_needed
-            and len(active_points) + len(existing_candidate_points) >= int(self.minimum_active_tracks)
-            and not underfilled_cells
-        ):
-            should_detect = False
+        total_active = len(combined_points)
+        should_detect = self._should_detect(frame, bool(underfilled_cells), total_active)
+        if should_detect:
+            if bool(getattr(self.props, "auto_track_budget", True)) and len(self.candidates) + len(self.existing_candidates) >= self.track_budget:
+                _discard_short_candidates(self.candidates, self.props, (item[0] for item in self.active))
+            self.track_budget = _redetection_budget(
+                self.props, self.track_budget, len(self.candidates) + len(self.existing_candidates),
+                total_active, self.minimum_active_tracks, self.target_track_count,
+            )
         if not should_detect or len(self.candidates) >= int(self.track_budget):
             return
         existing_points = []
@@ -253,25 +257,26 @@ class _StreamPassSession:
         mask = _limit_mask_to_cells(mask, underfilled_cells, width, height, self.props, self.provider.np)
         self.last_detection_frame = int(frame)
         points = detect_shi_tomasi(gray, self.detection_settings, existing_points, mask)[:capacity]
+        first_new_index = len(self.candidates)
         for point in points:
             candidate = TrackCandidate(self.next_id, int(frame), source_batch_id=self.source_batch_offset + len(self.candidates) + 1)
             candidate.samples.append(_sample(frame, point[0], point[1]))
             self.candidates.append(candidate)
             self.active.append((candidate, float(point[0]), float(point[1])))
             self.next_id += 1
+        if bool(getattr(self.props, "extend_new_tracks", False)):
+            _extend_new_tracks(
+                self.context, self.clip, self.props, self.provider, self.candidates[first_new_index:],
+                list(reversed(self.frames[max(0, self.frame_index - _NEW_TRACK_EXTENSION_FRAMES):self.frame_index + 1])),
+                self.lk_settings,
+            )
 
-    def _should_detect(self, frame, distribution_underfilled: bool = False) -> bool:
-        if not self.props.enable_redetect:
-            return frame == self.frames[0]
-        if frame == self.frames[0]:
-            return True
-        if not bool(self.props.adaptive_redetect):
-            return _is_periodic_detection_frame(frame, self.frames[0], self.props)
-        if len(self.active) >= int(self.minimum_active_tracks) and not distribution_underfilled:
-            return False
-        if self.last_detection_frame is None:
-            return True
-        return abs(int(frame) - int(self.last_detection_frame)) >= int(self.props.redetect_interval)
+    def _should_detect(self, frame, distribution_underfilled: bool = False, active_count=None) -> bool:
+        return _should_redetect(
+            self.props, frame, self.frames[0], self.last_detection_frame,
+            len(self.active) if active_count is None else active_count,
+            self.minimum_active_tracks, distribution_underfilled,
+        )
 
 
 def run_detect_track(context, clip, props, cancel_cb=None, progress_cb=None) -> tuple[list[TrackCandidate], TrackingStats]:
@@ -315,6 +320,12 @@ def run_detect_track(context, clip, props, cancel_cb=None, progress_cb=None) -> 
                 frames,
                 cancel_cb=cancel_cb,
                 progress_cb=progress_cb,
+            )
+            stats.cancellation_state = "Cancelled before bake" if cancel_cb and cancel_cb() else "Completed"
+        elif props.tracking_direction == "BACKWARD":
+            candidates = _run_stream_pass(
+                context, clip, props, provider, list(reversed(frames)),
+                cancel_cb=cancel_cb, progress_cb=progress_cb, progress_label="Backward",
             )
             stats.cancellation_state = "Cancelled before bake" if cancel_cb and cancel_cb() else "Completed"
         else:
@@ -463,6 +474,11 @@ def _run_detection_batches(context, clip, props, provider, frames, stats, cancel
         if props.detect_only_when_needed and len(active) >= int(minimum_active_tracks) and not underfilled_cells:
             points = []
         distribution_deficit = _cell_deficit(underfilled_cells, active, width, height, props)
+        if bool(getattr(props, "auto_track_budget", True)) and len(candidates) >= track_budget:
+            _discard_short_candidates(candidates, props)
+        track_budget = _redetection_budget(
+            props, track_budget, len(candidates), len(active), minimum_active_tracks, target_track_count,
+        )
         remaining_budget = max(0, int(track_budget) - len(candidates))
         selection_limit = min(
             remaining_budget,
@@ -496,7 +512,7 @@ def _run_detection_batches(context, clip, props, provider, frames, stats, cancel
         )
         next_id += len(new_tracks)
         candidates.extend(new_tracks)
-        if len(candidates) >= int(track_budget):
+        if len(candidates) >= int(track_budget) and not bool(getattr(props, "auto_track_budget", True)):
             candidates = candidates[: int(track_budget)]
             break
     return candidates
@@ -550,8 +566,8 @@ def _run_auto_bidirectional_stream(context, clip, props, provider, frames, cance
         provider,
         list(reversed(frames)),
         existing_candidates=forward_candidates,
-        first_id=len(forward_candidates) + 1,
-        source_batch_offset=len(forward_candidates),
+        first_id=_next_candidate_id(forward_candidates),
+        source_batch_offset=max((item.source_batch_id for item in forward_candidates), default=0),
         cancel_cb=cancel_cb,
         progress_cb=backward_progress,
         progress_label="Backward",
@@ -628,23 +644,17 @@ def _run_stream_pass(
         combined_points = active_points + existing_candidate_points
         underfilled_cells = _underfilled_cells_for_points(combined_points, width, height, props)
         underfilled_cells = _add_lead_edge_cells(underfilled_cells, last_motion_vector, width, height, props)
-        if bool(props.adaptive_redetect) and props.enable_redetect:
-            should_detect = (
-                frame == frames[0]
-                or (
-                    (len(active) < int(minimum_active_tracks) or bool(underfilled_cells))
-                    and (
-                        last_detection_frame is None
-                        or abs(int(frame) - int(last_detection_frame)) >= int(props.redetect_interval)
-                    )
-                )
+        should_detect = _should_redetect(
+            props, frame, frames[0], last_detection_frame, len(combined_points),
+            minimum_active_tracks, bool(underfilled_cells),
+        )
+        if should_detect:
+            if bool(getattr(props, "auto_track_budget", True)) and len(candidates) + len(existing_candidates) >= track_budget:
+                _discard_short_candidates(candidates, props, (item[0] for item in active))
+            track_budget = _redetection_budget(
+                props, track_budget, len(candidates) + len(existing_candidates), len(combined_points),
+                minimum_active_tracks, target_track_count,
             )
-        else:
-            should_detect = frame == frames[0]
-            if props.enable_redetect and not bool(props.adaptive_redetect):
-                should_detect = _is_periodic_detection_frame(frame, frames[0], props)
-            if props.detect_only_when_needed and len(active) >= int(minimum_active_tracks) and not underfilled_cells:
-                should_detect = False
         if should_detect and len(candidates) < int(track_budget):
             existing_points = []
             if props.use_existing_tracks_as_exclusion_points:
@@ -676,18 +686,53 @@ def _run_stream_pass(
                 continue
             last_detection_frame = int(frame)
             points = detect_shi_tomasi(gray, detection_settings, existing_points, mask)[:capacity]
+            first_new_index = len(candidates)
             for point in points:
                 candidate = TrackCandidate(next_id, int(frame), source_batch_id=source_batch_offset + len(candidates) + 1)
                 candidate.samples.append(_sample(frame, point[0], point[1]))
                 candidates.append(candidate)
                 active.append((candidate, float(point[0]), float(point[1])))
                 next_id += 1
+            if bool(getattr(props, "extend_new_tracks", False)):
+                _extend_new_tracks(
+                    context, clip, props, provider, candidates[first_new_index:],
+                    list(reversed(frames[max(0, frame_index - _NEW_TRACK_EXTENSION_FRAMES):frame_index + 1])),
+                    lk_settings, cancel_cb=cancel_cb,
+                )
         previous_gray = gray
         if progress_cb:
             progress_cb(frame_index + 1, len(frames), f"{progress_label} {frame_index + 1}/{len(frames)}, active {len(active)}")
     for candidate in candidates:
         candidate.samples.sort(key=lambda sample: sample.frame)
     return candidates
+
+
+def _extend_new_tracks(context, clip, props, provider, candidates, frames, lk_settings, cancel_cb=None):
+    if not bool(getattr(props, "extend_new_tracks", False)) or not candidates or len(frames) < 2:
+        return
+    frames = frames[:_NEW_TRACK_EXTENSION_FRAMES + 1]
+    active = [(candidate, candidate.samples[0].x, candidate.samples[0].y) for candidate in candidates]
+    previous_gray = provider.read_gray(frames[0])
+    for frame in frames[1:]:
+        if (cancel_cb and cancel_cb()) or bool(getattr(props, "cancel_requested", False)):
+            break
+        gray = provider.read_gray(frame)
+        results = track_points_step(previous_gray, gray, [(x, y) for _, x, y in active], lk_settings)
+        next_active = []
+        mask_cache = {}
+        for (candidate, old_x, old_y), (x, y, lk_error, fb_error, reason) in zip(active, results):
+            if reason is not None or _outside_mask_boundary(
+                context, clip, props, provider, frame, x, y, mask_cache, previous=(old_x, old_y),
+            ):
+                continue
+            candidate.samples.append(_sample(frame, x, y, lk_error, fb_error))
+            next_active.append((candidate, float(x), float(y)))
+        if not next_active:
+            break
+        active = next_active
+        previous_gray = gray
+    for candidate in candidates:
+        candidate.samples.sort(key=lambda sample: sample.frame)
 
 
 def _tracks_from_points(
@@ -764,6 +809,9 @@ def _batch_tracking_frames(all_frames: list[int], detection_frames: list[int], d
     else:
         start = _neighbor_midpoint(previous_detection, detection_frame, all_frames[0])
         end = _neighbor_midpoint(detection_frame, next_detection, all_frames[-1])
+    if detection_index > 0 and bool(getattr(props, "extend_new_tracks", False)):
+        start -= _NEW_TRACK_EXTENSION_FRAMES
+        end += _NEW_TRACK_EXTENSION_FRAMES
     start = max(min(all_frames), min(max(all_frames), int(start)))
     end = max(min(all_frames), min(max(all_frames), int(end)))
     return [frame for frame in all_frames if start <= frame <= end]
@@ -878,6 +926,43 @@ def _uses_tracking_mask_boundary(props) -> bool:
 
 def _replaces_autotrack(props) -> bool:
     return str(getattr(props, "track_replace_mode", "AUTO_REUSE")) in {"AUTO_REUSE", "REPLACE_AUTOTRACK"}
+
+
+def _should_redetect(props, frame, first_frame, last_detection_frame, active_count, minimum_active, underfilled):
+    if int(frame) == int(first_frame):
+        return True
+    if not props.enable_redetect:
+        return False
+    if int(active_count) < 8:
+        return True
+    if not props.adaptive_redetect:
+        return _is_periodic_detection_frame(frame, first_frame, props) and (
+            not props.detect_only_when_needed or active_count < minimum_active or underfilled
+        )
+    if active_count >= minimum_active and not underfilled:
+        return False
+    return last_detection_frame is None or abs(int(frame) - int(last_detection_frame)) >= max(1, int(props.redetect_interval))
+
+
+def _next_candidate_id(candidates):
+    return max((int(candidate.id) for candidate in candidates), default=0) + 1
+
+
+def _discard_short_candidates(candidates, props, protected=()):
+    protected_ids = {id(candidate) for candidate in protected}
+    minimum = max(1, int(getattr(props, "minimum_track_length", 8)))
+    candidates[:] = [
+        candidate for candidate in candidates
+        if id(candidate) in protected_ids or sum(sample.valid for sample in candidate.samples) >= minimum
+    ]
+
+
+def _redetection_budget(props, budget, used, active_count, minimum_active, target):
+    # An automatic working estimate must not abandon the remaining frames when
+    # earlier candidates have ended. Explicit manual budgets remain hard limits.
+    if bool(getattr(props, "auto_track_budget", True)) and used >= budget and active_count < max(8, minimum_active):
+        return int(used) + max(8, int(target))
+    return int(budget)
 
 
 def _track_budget(props, frame_count: int, provider=None) -> int:
@@ -1174,12 +1259,6 @@ def _detection_frames(frames: list[int], props, current_frame: int | None = None
         first = start
     if direction == "BACKWARD" or not props.enable_redetect:
         return [first]
-    if direction in {"BOTH", "CURRENT"}:
-        return _unique_frames(
-            [first] + _forward_supplemental_anchors(first, end, max(1, int(props.redetect_interval))),
-            start,
-            end,
-        )
     interval = max(1, int(props.redetect_interval))
     values = [first]
     if direction == "BACKWARD":
@@ -1222,27 +1301,6 @@ def _is_periodic_detection_frame(frame: int, first_frame: int, props) -> bool:
 
 def _clamp_frame(frame, start: int, end: int) -> int:
     return max(int(start), min(int(end), int(frame)))
-
-
-def _forward_supplemental_anchors(first: int, end: int, interval: int) -> list[int]:
-    span = int(end) - int(first)
-    if span < max(12, int(interval)):
-        return []
-    return [
-        int(first) + max(int(interval), int(span * 0.5)),
-        int(first) + max(int(interval) * 2, int(span * 0.75)),
-    ]
-
-
-def _unique_frames(values: list[int], start: int, end: int) -> list[int]:
-    frames = []
-    seen = set()
-    for value in values:
-        frame = _clamp_frame(value, start, end)
-        if frame not in seen:
-            frames.append(frame)
-            seen.add(frame)
-    return frames
 
 
 def _delete_autotrack_tracks(context, clip) -> int:

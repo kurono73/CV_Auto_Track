@@ -308,16 +308,23 @@ def _ransac_mask_for_pair(points_a, points_b, settings: FilteringSettings):
     b = np.asarray(points_b, dtype=np.float32)
     mask = None
     if settings.ransac_model in {"FUNDAMENTAL", "AUTO"} and len(points_a) >= 8:
-        _, mask = cv2.findFundamentalMat(
-            a,
-            b,
-            cv2.FM_RANSAC,
-            settings.ransac_threshold,
-            settings.ransac_confidence,
-            200,
-        )
+        try:
+            _, mask = cv2.findFundamentalMat(
+                a,
+                b,
+                cv2.FM_RANSAC,
+                settings.ransac_threshold,
+                settings.ransac_confidence,
+                200,
+            )
+        except cv2.error:
+            # Degenerate correspondences can trigger OpenCV's seven-point solver assertion.
+            mask = None
     if mask is None and settings.ransac_model in {"HOMOGRAPHY", "AUTO"} and len(points_a) >= 4:
-        _, mask = cv2.findHomography(a, b, cv2.RANSAC, settings.ransac_threshold)
+        try:
+            _, mask = cv2.findHomography(a, b, cv2.RANSAC, settings.ransac_threshold)
+        except cv2.error:
+            mask = None
     if mask is None:
         return None
     return mask

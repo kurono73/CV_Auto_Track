@@ -179,6 +179,7 @@ class CV_AUTOTRACK_PT_input(bpy.types.Panel):
             row.prop(props, "custom_start_frame", text="Start")
             row.prop(props, "custom_end_frame", text="End")
         _labeled_prop(layout, props, "tracking_direction", "Direction", factor=0.34)
+        layout.prop(props, "extend_new_tracks")
         _labeled_prop(layout, props, "analysis_scale", "Scale", factor=0.34)
         if props.advanced_mode:
             layout.prop(props, "auto_scale_pixel_parameters", text="Auto Scale Px")
